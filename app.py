@@ -55,6 +55,14 @@ div[role="radiogroup"]{background:rgba(255,255,255,.82);border:1px solid var(--l
 .login-shell{background:linear-gradient(150deg,rgba(255,255,255,.96),rgba(249,243,232,.96));border:1px solid var(--line);border-radius:26px;padding:26px;box-shadow:0 20px 50px rgba(52,45,36,.14);margin-top:4vh;text-align:center}
 .login-badge{display:inline-block;background:#eee5d2;color:#5a5042;border-radius:999px;padding:6px 11px;font-size:.74rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
 .section-title{font-size:.8rem;text-transform:uppercase;letter-spacing:.12em;color:#8a806f;font-weight:850;margin-bottom:-6px}
+
+.login-hero{min-height:285px;background-size:cover;background-position:center;border-radius:26px 26px 0 0;display:flex;align-items:flex-end;box-shadow:0 18px 45px rgba(40,34,27,.14);overflow:hidden}
+.login-hero-content{padding:28px 30px;color:white;width:100%;text-shadow:0 2px 15px rgba(0,0,0,.35)}
+.login-eyebrow{font-size:.72rem;letter-spacing:.18em;font-weight:800;color:#f0dfb8;margin-bottom:8px}
+.login-title{font-size:2.15rem;font-weight:850;letter-spacing:-.035em;line-height:1.05}
+.login-copy{font-size:.95rem;max-width:520px;margin-top:10px;color:#f5f1e8}
+.login-card{background:rgba(255,255,255,.97);border:1px solid var(--line);border-top:0;border-radius:0 0 26px 26px;padding:24px 28px 26px;box-shadow:0 18px 45px rgba(40,34,27,.14);margin-bottom:30px}
+.login-security{margin-top:14px;padding:10px 12px;border-radius:12px;background:#f6f2e9;color:#71695c;font-size:.78rem;text-align:center;border:1px solid #e7dece}
 @media(max-width:700px){.block-container{padding-left:.65rem;padding-right:.65rem}.hero{padding:24px 19px;border-radius:20px}.hero h1{font-size:1.7rem}.brandbar{padding:9px 11px}.metric{min-height:101px;padding:15px}.mv{font-size:1.55rem}}
 </style>
 """, unsafe_allow_html=True)
@@ -93,23 +101,49 @@ def authenticate(user,pin):
     if u == OWNER_USER.lower() and h(pin)==h(OWNER_PIN): return {"name":"Camelia Robles","role":"viewer"}
 
 def login():
-    _,c,_=st.columns([1,1.15,1])
-    with c:
-        st.markdown("<div class='login-shell'>",unsafe_allow_html=True)
-        st.image(str(ASSETS/"camelia_logo.png"),width=215)
-        st.markdown("<span class='login-badge'>Cierre de operaciones</span>",unsafe_allow_html=True)
-        st.markdown("## Inventario profesional")
-        st.caption("Control, destino y entrega final de los bienes de Camelia")
-        with st.form("login"):
-            user=st.text_input("Nombre de usuario",placeholder="Administrador o Camelia Robles")
-            pin=st.text_input("PIN de acceso",type="password")
-            go=st.form_submit_button("Ingresar al inventario",type="primary",use_container_width=True)
+    st.markdown("<div style='height:2vh'></div>", unsafe_allow_html=True)
+    left, center, right = st.columns([0.75, 1.5, 0.75])
+    with center:
+        interior = ASSETS / "camelia_interior.jpeg"
+        if interior.exists():
+            img64 = base64.b64encode(interior.read_bytes()).decode()
+            st.markdown(
+                f"""
+                <div class='login-hero' style="background-image:linear-gradient(180deg,rgba(28,26,24,.18),rgba(28,26,24,.78)),url('data:image/jpeg;base64,{img64}')">
+                    <div class='login-hero-content'>
+                        <div class='login-eyebrow'>CAMELIA MODERN MEXICAN CUISINE</div>
+                        <div class='login-title'>Inventario de Cierre</div>
+                        <div class='login-copy'>Control y seguimiento de cada artículo durante el cierre del restaurante.</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown("<div class='login-card'>", unsafe_allow_html=True)
+        logo_col, text_col = st.columns([0.65, 1.35], vertical_alignment="center")
+        with logo_col:
+            st.image(str(ASSETS / "camelia_logo.png"), use_container_width=True)
+        with text_col:
+            st.markdown("### Acceso al inventario")
+            st.caption("Selecciona tu perfil e ingresa tu PIN privado.")
+        with st.form("login", clear_on_submit=False):
+            profile = st.selectbox(
+                "Usuario",
+                ["Camelia Robles", "Administrador"],
+                index=0,
+            )
+            pin = st.text_input("PIN de acceso", type="password", placeholder="Ingresa tu PIN")
+            go = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
         if go:
-            p=authenticate(user,pin)
-            if p: st.session_state.user=p; st.rerun()
-            else: st.error("Nombre de usuario o PIN incorrecto.")
-        st.markdown("<div class='note' style='text-align:left'><b>Accesos iniciales</b><br>Administrador: <code>administrador</code> · PIN <code>5866</code><br>Camelia Robles: <code>Camelia Robles</code> · PIN <code>7319</code></div>",unsafe_allow_html=True)
-        st.markdown("</div>",unsafe_allow_html=True)
+            login_user = OWNER_USER if profile == "Camelia Robles" else ADMIN_USER
+            user_profile = authenticate(login_user, pin)
+            if user_profile:
+                st.session_state.user = user_profile
+                st.rerun()
+            else:
+                st.error("PIN incorrecto para el usuario seleccionado.")
+        st.markdown("<div class='login-security'>🔒 Acceso privado. Los datos de ingreso no se muestran dentro de la aplicación.</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 def load_df():
     with db() as conn: return pd.read_sql_query("SELECT * FROM inventory ORDER BY updated_at DESC,id DESC",conn)
@@ -136,58 +170,120 @@ def delete_item(item_id,user):
     log(item_id,"ELIMINADO",row["item_name"] if row else "",user)
 
 def form(existing=None):
-    e=existing or {}
-    with st.form("item_form",clear_on_submit=not bool(e)):
-        st.markdown("### Datos del artículo")
-        c1,c2=st.columns(2)
-        cat_default=e.get("category","Vinos y licores"); cat=list(CATEGORIES)[list(CATEGORIES).index(cat_default) if cat_default in CATEGORIES else 0]
-        with c1: category=st.selectbox("Categoría *",list(CATEGORIES),index=list(CATEGORIES).index(cat))
-        subs=CATEGORIES[category]; sub=e.get("subcategory",subs[0])
-        with c2: subcategory=st.selectbox("Subcategoría *",subs,index=subs.index(sub) if sub in subs else 0)
-        c1,c2=st.columns([1.4,1])
-        with c1: name=st.text_input("Nombre del artículo *",value=e.get("item_name",""))
-        with c2: brand=st.text_input("Marca / fabricante",value=e.get("brand",""))
-        description=st.text_area("Descripción",value=e.get("description",""),placeholder="Modelo, presentación, color, medidas o características.")
-        c1,c2,c3=st.columns(3)
-        with c1: qty=st.number_input("Cantidad *",min_value=0.0,step=1.0,value=float(e.get("quantity",1) or 1))
-        unit=e.get("unit","pieza(s)")
-        with c2: unit=st.selectbox("Unidad",UNITS,index=UNITS.index(unit) if unit in UNITS else 0)
-        cond=e.get("condition_status","Bueno")
-        with c3: condition=st.selectbox("Estado físico",CONDITIONS,index=CONDITIONS.index(cond) if cond in CONDITIONS else 2)
-        c1,c2=st.columns(2)
-        with c1: current=st.text_input("Ubicación actual dentro de Camelia",value=e.get("current_area",""),placeholder="Bar, cocina, almacén...")
-        with c2: value=st.number_input("Valor estimado por unidad ($)",min_value=0.0,step=1.0,value=float(e.get("estimated_unit_value",0) or 0))
-        expiration=None; lot=e.get("lot_number","")
-        if category in ["Alimentos","Vinos y licores"]:
-            st.markdown("### Control de caducidad")
-            c1,c2=st.columns(2)
-            with c1:
-                has_exp=st.checkbox("Tiene fecha de caducidad / consumo preferente",value=bool(e.get("expiration_date")))
-                if has_exp:
-                    raw=e.get("expiration_date"); default=date.fromisoformat(str(raw)[:10]) if raw else date.today()+timedelta(days=30)
-                    expiration=st.date_input("Fecha",value=default)
-            with c2: lot=st.text_input("Lote",value=lot)
-        st.markdown("### Destino y seguimiento")
-        c1,c2=st.columns(2)
-        dest=e.get("destination","Por definir"); status=e.get("transfer_status","Pendiente")
-        with c1: destination=st.selectbox("¿A dónde se enviará? *",DESTINATIONS,index=DESTINATIONS.index(dest) if dest in DESTINATIONS else len(DESTINATIONS)-1)
-        with c2: transfer_status=st.selectbox("Estatus del movimiento",STATUSES,index=STATUSES.index(status) if status in STATUSES else 0)
-        c1,c2=st.columns(2)
-        with c1: dest_detail=st.text_input("Ubicación específica de destino",value=e.get("destination_detail",""))
-        with c2: responsible=st.text_input("Responsable de recibir / trasladar",value=e.get("responsible_person",""))
-        c1,c2=st.columns(2)
+    e = existing or {}
+    form_mode = "edit" if e else "new"
+    category_key = f"category_selector_{form_mode}_{e.get('id', 'new')}"
+    default_category = e.get("category", "Vinos y licores")
+    category_options = list(CATEGORIES)
+    default_index = category_options.index(default_category) if default_category in category_options else 0
+
+    st.markdown("### Clasificación del artículo")
+    st.caption("Primero selecciona la categoría. La lista de subcategorías se actualizará automáticamente.")
+    category = st.selectbox(
+        "Categoría *",
+        category_options,
+        index=default_index,
+        key=category_key,
+    )
+    subs = CATEGORIES[category]
+    saved_sub = e.get("subcategory", "")
+    sub_default = saved_sub if saved_sub in subs else subs[0]
+
+    with st.form(f"item_form_{form_mode}_{e.get('id', 'new')}", clear_on_submit=not bool(e)):
+        subcategory = st.selectbox(
+            "Subcategoría *",
+            subs,
+            index=subs.index(sub_default),
+            help=f"Opciones disponibles para {category}.",
+        )
+        st.markdown("### Información principal")
+        c1, c2 = st.columns([1.4, 1])
         with c1:
-            has_date=st.checkbox("Registrar fecha de movimiento",value=bool(e.get("transfer_date"))); transfer_date=None
+            name = st.text_input("Nombre del artículo *", value=e.get("item_name", ""))
+        with c2:
+            brand = st.text_input("Marca / fabricante", value=e.get("brand", ""))
+        description = st.text_area(
+            "Descripción",
+            value=e.get("description", ""),
+            placeholder="Modelo, presentación, color, medidas o características.",
+        )
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            qty = st.number_input("Cantidad *", min_value=0.0, step=1.0, value=float(e.get("quantity", 1) or 1))
+        unit_default = e.get("unit", "pieza(s)")
+        with c2:
+            unit = st.selectbox("Unidad", UNITS, index=UNITS.index(unit_default) if unit_default in UNITS else 0)
+        cond_default = e.get("condition_status", "Bueno")
+        with c3:
+            condition = st.selectbox("Estado físico", CONDITIONS, index=CONDITIONS.index(cond_default) if cond_default in CONDITIONS else 2)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            current = st.text_input("Ubicación actual dentro de Camelia", value=e.get("current_area", ""), placeholder="Bar, cocina, almacén...")
+        with c2:
+            value = st.number_input("Valor estimado por unidad ($)", min_value=0.0, step=1.0, value=float(e.get("estimated_unit_value", 0) or 0))
+
+        expiration = None
+        lot = e.get("lot_number", "")
+        if category in ["Alimentos", "Vinos y licores"]:
+            st.markdown("### Control de caducidad")
+            c1, c2 = st.columns(2)
+            with c1:
+                has_exp = st.checkbox("Tiene fecha de caducidad / consumo preferente", value=bool(e.get("expiration_date")))
+                if has_exp:
+                    raw = e.get("expiration_date")
+                    default = date.fromisoformat(str(raw)[:10]) if raw else date.today() + timedelta(days=30)
+                    expiration = st.date_input("Fecha", value=default)
+            with c2:
+                lot = st.text_input("Lote", value=lot)
+
+        st.markdown("### Destino y seguimiento")
+        c1, c2 = st.columns(2)
+        dest_default = e.get("destination", "Por definir")
+        status_default = e.get("transfer_status", "Pendiente")
+        with c1:
+            destination = st.selectbox("¿A dónde se enviará? *", DESTINATIONS, index=DESTINATIONS.index(dest_default) if dest_default in DESTINATIONS else len(DESTINATIONS)-1)
+        with c2:
+            transfer_status = st.selectbox("Estatus del movimiento", STATUSES, index=STATUSES.index(status_default) if status_default in STATUSES else 0)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            dest_detail = st.text_input("Ubicación específica de destino", value=e.get("destination_detail", ""))
+        with c2:
+            responsible = st.text_input("Responsable de recibir / trasladar", value=e.get("responsible_person", ""))
+
+        c1, c2 = st.columns(2)
+        with c1:
+            has_date = st.checkbox("Registrar fecha de movimiento", value=bool(e.get("transfer_date")))
+            transfer_date = None
             if has_date:
-                raw=e.get("transfer_date"); default=date.fromisoformat(str(raw)[:10]) if raw else date.today(); transfer_date=st.date_input("Fecha de movimiento",value=default)
-        with c2: photo=st.file_uploader("Fotografía del artículo",type=["png","jpg","jpeg","webp"])
-        notes=st.text_area("Notas",value=e.get("notes",""))
-        go=st.form_submit_button("Guardar artículo" if not e else "Actualizar artículo",type="primary",use_container_width=True)
-    if not go: return
-    if not name.strip(): st.error("El nombre es obligatorio."); return
-    photo_bytes=e.get("photo"); photo_name=e.get("photo_name","")
-    if photo: photo_bytes=photo.getvalue(); photo_name=photo.name
-    return dict(category=category,subcategory=subcategory,item_name=name.strip(),description=description.strip(),quantity=qty,unit=unit,brand=brand.strip(),condition_status=condition,current_area=current.strip(),expiration_date=expiration,lot_number=lot.strip(),estimated_unit_value=value,destination=destination,destination_detail=dest_detail.strip(),transfer_status=transfer_status,responsible_person=responsible.strip(),transfer_date=transfer_date,notes=notes.strip(),photo=photo_bytes,photo_name=photo_name)
+                raw = e.get("transfer_date")
+                default = date.fromisoformat(str(raw)[:10]) if raw else date.today()
+                transfer_date = st.date_input("Fecha de movimiento", value=default)
+        with c2:
+            photo = st.file_uploader("Fotografía del artículo", type=["png", "jpg", "jpeg", "webp"])
+
+        notes = st.text_area("Notas", value=e.get("notes", ""))
+        go = st.form_submit_button("Guardar artículo" if not e else "Actualizar artículo", type="primary", use_container_width=True)
+
+    if not go:
+        return
+    if not name.strip():
+        st.error("El nombre es obligatorio.")
+        return
+    photo_bytes = e.get("photo")
+    photo_name = e.get("photo_name", "")
+    if photo:
+        photo_bytes = photo.getvalue()
+        photo_name = photo.name
+    return dict(
+        category=category, subcategory=subcategory, item_name=name.strip(), description=description.strip(),
+        quantity=qty, unit=unit, brand=brand.strip(), condition_status=condition, current_area=current.strip(),
+        expiration_date=expiration, lot_number=lot.strip(), estimated_unit_value=value, destination=destination,
+        destination_detail=dest_detail.strip(), transfer_status=transfer_status, responsible_person=responsible.strip(),
+        transfer_date=transfer_date, notes=notes.strip(), photo=photo_bytes, photo_name=photo_name,
+    )
 
 def metric(label,value,sub=""):
     st.markdown(f"<div class='metric'><div class='ml'>{label}</div><div class='mv'>{value}</div><div class='ms'>{sub}</div></div>",unsafe_allow_html=True)
@@ -201,7 +297,7 @@ def expiry(raw):
     return d.strftime("%d/%m/%Y"),days
 
 def dashboard(df):
-    st.markdown("<div class='hero'><small>Camelia Modern Mexican Cuisine</small><h1>Cierre profesional de inventario</h1><p>Una vista clara y ejecutiva para conocer qué existe, en qué condición se encuentra y cuál será el destino final de cada artículo.</p></div>",unsafe_allow_html=True)
+    st.markdown("<div class='hero'><small>Camelia Modern Mexican Cuisine</small><h1>Inventario de Cierre</h1><p>Una vista clara y ejecutiva para conocer qué existe, en qué condición se encuentra y cuál será el destino final de cada artículo.</p></div>",unsafe_allow_html=True)
     total=len(df); units=df.quantity.sum() if total else 0; pending=df.transfer_status.isin(["Pendiente","Separado","En traslado"]).sum() if total else 0; est=(df.quantity*df.estimated_unit_value).sum() if total else 0
     soon=expired=0
     if total:
