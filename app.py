@@ -233,7 +233,7 @@ def form(existing=None):
                 has_exp = st.checkbox("Tiene fecha de caducidad / consumo preferente", value=bool(e.get("expiration_date")))
                 if has_exp:
                     raw = e.get("expiration_date")
-                    default = date.fromisoformat(str(raw)[:10]) if raw else date.today() + timedelta(days=30)
+                    default = parse_optional_date(raw, date.today() + timedelta(days=30))
                     expiration = st.date_input("Fecha", value=default)
             with c2:
                 lot = st.text_input("Lote", value=lot)
@@ -259,7 +259,7 @@ def form(existing=None):
             transfer_date = None
             if has_date:
                 raw = e.get("transfer_date")
-                default = date.fromisoformat(str(raw)[:10]) if raw else date.today()
+                default = parse_optional_date(raw, date.today())
                 transfer_date = st.date_input("Fecha de movimiento", value=default)
         with c2:
             photo = st.file_uploader("Fotografía del artículo", type=["png", "jpg", "jpeg", "webp"])
