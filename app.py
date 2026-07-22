@@ -508,30 +508,46 @@ def reports(df):
 
 
 def guest_excel_data(df):
-    """Excel de consulta para el interesado, sin precios ni datos administrativos."""
+    """Excel para el interesado con precios y valor del inventario que permanece en Camelia."""
     out = io.BytesIO()
     visible = df.drop(
         columns=[
-            "estimated_unit_value", "photo", "photo_name", "created_at", "updated_at",
-            "created_by", "responsible_person", "transfer_date", "destination_detail",
+            "photo", "photo_name", "created_at", "updated_at", "created_by",
+            "responsible_person", "transfer_date", "destination_detail",
         ],
         errors="ignore",
     ).copy()
+    visible["Valor total"] = visible["quantity"] * visible["estimated_unit_value"]
     visible = visible.rename(columns={
         "id": "ID", "category": "Categoría", "subcategory": "Tipo",
         "item_name": "Artículo", "description": "Descripción", "quantity": "Cantidad",
         "unit": "Unidad", "brand": "Marca", "condition_status": "Estado",
-        "current_area": "Ubicación actual", "expiration_date": "Caducidad",
-        "lot_number": "Lote", "destination": "Destino",
-        "transfer_status": "Estatus", "notes": "Notas",
+        "current_area": "Ubicación actual", "location_summary": "Áreas de origen",
+        "expiration_date": "Caducidad", "lot_number": "Lote",
+        "estimated_unit_value": "Precio unitario", "destination": "Destino",
+        "destination_summary": "Distribución", "transfer_status": "Estatus", "notes": "Notas",
     })
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         visible.to_excel(writer, index=False, sheet_name="Inventario Camelia")
-        df.groupby("category", as_index=False).agg(
-            Registros=("id", "count"), Cantidad=("quantity", "sum")
-        ).rename(columns={"category": "Categoría"}).to_excel(
-            writer, index=False, sheet_name="Resumen categorías"
+        summary = df.assign(Valor=df.quantity * df.estimated_unit_value).groupby(
+            "category", as_index=False
+        ).agg(Registros=("id", "count"), Cantidad=("quantity", "sum"), Valor=("Valor", "sum")).rename(
+            columns={"category": "Categoría"}
         )
+        summary.to_excel(writer, index=False, sheet_name="Resumen categorías")
+        ws = writer.book["Inventario Camelia"]
+        headers = {cell.value: cell.column for cell in ws[1]}
+        for header in ("Precio unitario", "Valor total"):
+            if header in headers:
+                col = headers[header]
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row=row, column=col).number_format = '$#,##0.00'
+        ws2 = writer.book["Resumen categorías"]
+        headers2 = {cell.value: cell.column for cell in ws2[1]}
+        if "Valor" in headers2:
+            col = headers2["Valor"]
+            for row in range(2, ws2.max_row + 1):
+                ws2.cell(row=row, column=col).number_format = '$#,##0.00'
     return out.getvalue()
 
 
@@ -546,13 +562,13 @@ def guest_dashboard(df):
     total = len(df)
     units = df.quantity.sum() if total else 0
     categories = df.category.nunique() if total else 0
-    conditions = df.condition_status.nunique() if total else 0
+    estimated_total = (df.quantity * df.estimated_unit_value).sum() if total else 0
     cols = st.columns(4)
     values = [
-        ("Registros", total, "Artículos incluidos"),
-        ("Unidades", f"{units:,.0f}", "Suma de cantidades"),
+        ("Artículos", total, "Registros incluidos"),
+        ("Unidades", f"{units:,.0f}", "Cantidad que permanece"),
         ("Categorías", categories, "Tipos de inventario"),
-        ("Condiciones", conditions, "Estados registrados"),
+        ("Valor total", f"${estimated_total:,.2f}", "Inventario que queda en Camelia"),
     ]
     for col, value in zip(cols, values):
         with col:
@@ -561,60 +577,81 @@ def guest_dashboard(df):
     if df.empty:
         st.info("Todavía no hay artículos marcados para permanecer en Camelia.")
         return
-    summary = df.groupby("category", as_index=False).agg(
-        Registros=("id", "count"), Cantidad=("quantity", "sum")
-    ).rename(columns={"category": "Categoría"})
+    summary = df.assign(Valor=df.quantity * df.estimated_unit_value).groupby(
+        "category", as_index=False
+    ).agg(Registros=("id", "count"), Cantidad=("quantity", "sum"), Valor=("Valor", "sum")).rename(
+        columns={"category": "Categoría", "Valor": "Valor estimado"}
+    )
+    summary["Valor estimado"] = summary["Valor estimado"].map(lambda x: f"${x:,.2f}")
     st.dataframe(summary, use_container_width=True, hide_index=True)
 
 
 def guest_inventory(df):
     st.markdown("## Inventario incluido")
-    st.caption("Relación detallada de los artículos que forman parte de la entrega de Camelia.")
+    st.caption("Selecciona un artículo para consultar su fotografía y toda la información disponible.")
     filtered = filter_df(df, "guest_inv_")
     if filtered.empty:
         st.info("No hay artículos que coincidan con los filtros.")
         return
-    view = view_df(filtered)
-    columns = [
-        "ID", "Categoría", "Tipo", "Artículo", "Marca", "Cantidad", "Estado",
-        "Ubicación actual", "Caducidad", "Movimiento", "Notas",
-    ]
+
+    table = filtered.copy()
+    table["Precio unitario"] = table["estimated_unit_value"].map(lambda x: f"${float(x):,.2f}")
+    table["Valor total"] = (table["quantity"] * table["estimated_unit_value"]).map(lambda x: f"${float(x):,.2f}")
+    table = table.rename(columns={
+        "id": "ID", "category": "Categoría", "subcategory": "Tipo",
+        "item_name": "Artículo", "brand": "Marca", "quantity": "Cantidad",
+        "unit": "Unidad", "condition_status": "Estado",
+    })
+    columns = ["ID", "Categoría", "Tipo", "Artículo", "Marca", "Cantidad", "Unidad", "Precio unitario", "Valor total", "Estado"]
     st.dataframe(
-        view[columns], use_container_width=True, hide_index=True, height=520,
+        table[columns], use_container_width=True, hide_index=True, height=430,
         column_config={
             "ID": st.column_config.NumberColumn(width="small"),
             "Artículo": st.column_config.TextColumn(width="large"),
-            "Notas": st.column_config.TextColumn(width="large"),
         },
     )
     st.caption(f"Mostrando {len(filtered)} de {len(df)} registros incluidos en Camelia.")
 
-    st.markdown("### Fotografías y detalle")
-    for _, row in filtered.iterrows():
-        title = f"#{int(row.id)} · {row.item_name} · {row.quantity:g} {row.unit}"
-        with st.expander(title):
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                photo = row.get("photo")
-                if photo is not None and not pd.isna(photo):
-                    st.image(photo, use_container_width=True)
-                else:
-                    st.caption("Sin fotografía registrada.")
-            with c2:
-                st.markdown(f"**Categoría:** {row.category} · {row.subcategory}")
-                st.markdown(f"**Marca:** {row.brand or 'Sin marca'}")
-                st.markdown(f"**Condición:** {row.condition_status}")
-                st.markdown(f"**Ubicación actual:** {row.current_area or 'No especificada'}")
-                if row.description:
-                    st.markdown(f"**Descripción:** {row.description}")
-                if row.notes:
-                    st.markdown(f"**Notas:** {row.notes}")
+    st.markdown("### Consultar artículo")
+    choices = {
+        f"#{int(r.id)} · {r.item_name} · {r.quantity:g} {r.unit}": int(r.id)
+        for _, r in filtered.sort_values(["item_name", "id"]).iterrows()
+    }
+    selected_label = st.selectbox("Artículo inventariado", list(choices.keys()))
+    selected = filtered[filtered.id.eq(choices[selected_label])].iloc[0]
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        photo = selected.get("photo")
+        if photo is not None and not pd.isna(photo):
+            st.image(photo, use_container_width=True, caption=selected.item_name)
+        else:
+            st.info("Este artículo no tiene fotografía registrada.")
+    with c2:
+        unit_price = float(selected.estimated_unit_value or 0)
+        total_value = float(selected.quantity or 0) * unit_price
+        st.markdown(f"### {selected.item_name}")
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            metric("Cantidad", f"{selected.quantity:g} {selected.unit}", "Permanece en Camelia")
+        with m2:
+            metric("Precio unitario", f"${unit_price:,.2f}", "Valor estimado")
+        with m3:
+            metric("Valor total", f"${total_value:,.2f}", "Cantidad × precio")
+        st.markdown(f"**Categoría:** {selected.category} · {selected.subcategory}")
+        st.markdown(f"**Marca:** {selected.brand or 'Sin marca'}")
+        st.markdown(f"**Condición:** {selected.condition_status}")
+        st.markdown(f"**Áreas de origen:** {selected.get('location_summary') or selected.current_area or 'No especificadas'}")
+        if selected.description:
+            st.markdown(f"**Descripción:** {selected.description}")
+        if selected.notes:
+            st.markdown(f"**Notas:** {selected.notes}")
 
 
 def guest_reports(df):
     st.markdown("## Documento de entrega")
     st.markdown(
-        "<div class='note'>Descarga la relación de artículos incluidos en el proceso de entrega de Camelia.</div>",
+        "<div class='note'>Descarga la relación de artículos, cantidades, precios y valores incluidos en el proceso de entrega de Camelia.</div>",
         unsafe_allow_html=True,
     )
     if df.empty:
@@ -627,12 +664,15 @@ def guest_reports(df):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+    total_value = (df.quantity * df.estimated_unit_value).sum()
     st.markdown(
         f"### Resumen de entrega\n- Fecha: {date.today().strftime('%d/%m/%Y')}"
         f"\n- Registros incluidos: {len(df)}"
         f"\n- Cantidad total: {df.quantity.sum():,.0f}"
         f"\n- Categorías: {df.category.nunique()}"
+        f"\n- Valor estimado total: ${total_value:,.2f}"
     )
+
 
 def main():
     init_db()
@@ -658,7 +698,6 @@ def main():
         guest_df["quantity"] = guest_df["camelia_quantity"]
         guest_df["destination"] = "Camelia · permanece en el local"
         guest_df["destination_summary"] = "Camelia · permanece en el local"
-        guest_df["estimated_unit_value"] = 0
         options = ["Inicio", "Inventario incluido", "Documento de entrega"]
         page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
         if page == "Inicio":
