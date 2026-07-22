@@ -34,6 +34,7 @@ CATEGORIES = {
     "Mobiliario": ["Mesas", "Sillas", "Bancos", "Sillones", "Anaqueles", "Gabinetes", "Decoración fija", "Equipo de terraza", "Otros"],
 }
 DESTINATIONS = ["Camelia · permanece en el local", "Coco Pirata", "Cabrón Carbón", "La Machaca", "Casa", "Bodega", "Venta", "Donación", "Desecho", "Por definir"]
+ALCOHOL_AREAS = ["Barra principal", "Barra parte superior", "Cava restaurante", "Bodega o cava sótano", "Bodega (Cárcel)"]
 UNITS = ["pieza(s)", "botella(s)", "caja(s)", "paquete(s)", "kg", "g", "litro(s)", "ml", "charola(s)", "bolsa(s)", "juego(s)", "otro"]
 STATUSES = ["Pendiente", "Separado", "En traslado", "Entregado", "Permanece en Camelia"]
 CONDITIONS = ["Nuevo", "Excelente", "Bueno", "Regular", "Requiere reparación", "No utilizable"]
@@ -107,6 +108,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS audit_log(
           id INTEGER PRIMARY KEY AUTOINCREMENT, inventory_id INTEGER, action TEXT NOT NULL,
           detail TEXT DEFAULT '', user_name TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS item_locations(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, inventory_id INTEGER NOT NULL,
+          area_name TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 0,
+          UNIQUE(inventory_id, area_name));
+        CREATE TABLE IF NOT EXISTS item_destinations(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, inventory_id INTEGER NOT NULL,
+          destination_name TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 0,
+          UNIQUE(inventory_id, destination_name));
         """)
 
 def h(v): return hashlib.sha256(str(v).encode()).hexdigest()
@@ -159,13 +168,75 @@ def login():
         st.markdown("</div>", unsafe_allow_html=True)
 
 def load_df():
-    with db() as conn: return pd.read_sql_query("SELECT * FROM inventory ORDER BY updated_at DESC,id DESC",conn)
+    with db() as conn:
+        df = pd.read_sql_query("SELECT * FROM inventory ORDER BY updated_at DESC,id DESC", conn)
+        locations = pd.read_sql_query("SELECT inventory_id, area_name, quantity FROM item_locations ORDER BY id", conn)
+        destinations = pd.read_sql_query("SELECT inventory_id, destination_name, quantity FROM item_destinations ORDER BY id", conn)
+    if df.empty:
+        return df
+    loc_map = {}
+    for item_id, group in locations.groupby("inventory_id") if not locations.empty else []:
+        loc_map[int(item_id)] = "; ".join(f"{r.area_name}: {r.quantity:g}" for _, r in group.iterrows() if float(r.quantity) > 0)
+    dest_map = {}
+    camelia_map = {}
+    allocated_map = {}
+    for item_id, group in destinations.groupby("inventory_id") if not destinations.empty else []:
+        dest_map[int(item_id)] = "; ".join(f"{r.destination_name}: {r.quantity:g}" for _, r in group.iterrows() if float(r.quantity) > 0)
+        c = group[group.destination_name.eq("Camelia · permanece en el local")]
+        camelia_map[int(item_id)] = float(c.quantity.sum()) if not c.empty else 0.0
+        allocated_map[int(item_id)] = float(group.quantity.sum())
+    df["location_summary"] = df.id.map(loc_map).fillna(df.current_area)
+    df["destination_summary"] = df.id.map(dest_map).fillna(df.destination)
+    df["camelia_quantity"] = df.id.map(camelia_map).fillna(0.0)
+    df["allocated_quantity"] = df.id.map(allocated_map).fillna(df.quantity)
+    df["inventory_status"] = df.apply(lambda r: "🟢 Completo" if abs(float(r.quantity)-float(r.allocated_quantity)) < 0.0001 else ("🟡 Pendiente" if float(r.allocated_quantity) < float(r.quantity) else "🔴 Error"), axis=1)
+    legacy = df["camelia_quantity"].eq(0) & df.destination.eq("Camelia · permanece en el local")
+    df.loc[legacy, "camelia_quantity"] = df.loc[legacy, "quantity"]
+    return df
+
+
+def get_allocations(item_id, existing=None):
+    with db() as conn:
+        loc = pd.read_sql_query("SELECT area_name, quantity FROM item_locations WHERE inventory_id=? ORDER BY id", conn, params=(item_id,)) if item_id else pd.DataFrame()
+        dest = pd.read_sql_query("SELECT destination_name, quantity FROM item_destinations WHERE inventory_id=? ORDER BY id", conn, params=(item_id,)) if item_id else pd.DataFrame()
+    locations = {str(r.area_name): float(r.quantity) for _, r in loc.iterrows()} if not loc.empty else {}
+    destinations = {str(r.destination_name): float(r.quantity) for _, r in dest.iterrows()} if not dest.empty else {}
+    if existing and not locations and existing.get("current_area"):
+        locations[str(existing.get("current_area"))] = float(existing.get("quantity", 0) or 0)
+    if existing and not destinations and existing.get("destination"):
+        destinations[str(existing.get("destination"))] = float(existing.get("quantity", 0) or 0)
+    return locations, destinations
+
+
+def save_allocations(item_id, locations, destinations):
+    with db() as conn:
+        conn.execute("DELETE FROM item_locations WHERE inventory_id=?", (item_id,))
+        conn.execute("DELETE FROM item_destinations WHERE inventory_id=?", (item_id,))
+        for area, qty in locations.items():
+            if float(qty) > 0:
+                conn.execute("INSERT INTO item_locations(inventory_id,area_name,quantity) VALUES(?,?,?)", (item_id, area, float(qty)))
+        for destination, qty in destinations.items():
+            if float(qty) > 0:
+                conn.execute("INSERT INTO item_destinations(inventory_id,destination_name,quantity) VALUES(?,?,?)", (item_id, destination, float(qty)))
+
+
+def duplicate_candidates(name, brand, exclude_id=None):
+    if not name.strip():
+        return pd.DataFrame()
+    with db() as conn:
+        q = "SELECT id,item_name,brand,quantity FROM inventory WHERE lower(item_name)=lower(?)"
+        params = [name.strip()]
+        if exclude_id:
+            q += " AND id<>?"; params.append(int(exclude_id))
+        return pd.read_sql_query(q, conn, params=params)
 
 def log(item_id,action,detail,user):
     with db() as conn: conn.execute("INSERT INTO audit_log(inventory_id,action,detail,user_name,created_at) VALUES(?,?,?,?,?)",(item_id,action,detail,user,datetime.now().isoformat(timespec='seconds')))
 
 def save_item(v,user,item_id=None):
     now=datetime.now().isoformat(timespec='seconds')
+    locations = v.pop("allocations_locations", {})
+    destinations_alloc = v.pop("allocations_destinations", {})
     fields=["category","subcategory","item_name","description","quantity","unit","brand","condition_status","current_area","expiration_date","lot_number","estimated_unit_value","destination","destination_detail","transfer_status","responsible_person","transfer_date","notes","photo","photo_name"]
     vals=[v.get(k) for k in fields]
     vals[9]=vals[9].isoformat() if hasattr(vals[9],"isoformat") else vals[9]
@@ -175,68 +246,97 @@ def save_item(v,user,item_id=None):
             conn.execute("UPDATE inventory SET "+",".join(f"{f}=?" for f in fields)+",updated_at=? WHERE id=?",(*vals,now,item_id)); sid=item_id; action="ACTUALIZADO"
         else:
             conn.execute(f"INSERT INTO inventory({','.join(fields)},created_at,updated_at,created_by) VALUES({','.join(['?']*(len(fields)+3))})",(*vals,now,now,user)); sid=conn.execute("SELECT last_insert_rowid()").fetchone()[0]; action="CREADO"
+    if locations or destinations_alloc:
+        save_allocations(sid, locations, destinations_alloc)
     log(sid,action,v["item_name"],user); return sid
 
 def delete_item(item_id,user):
     with db() as conn:
-        row=conn.execute("SELECT item_name FROM inventory WHERE id=?",(item_id,)).fetchone(); conn.execute("DELETE FROM inventory WHERE id=?",(item_id,))
+        row=conn.execute("SELECT item_name FROM inventory WHERE id=?",(item_id,)).fetchone()
+        conn.execute("DELETE FROM item_locations WHERE inventory_id=?", (item_id,))
+        conn.execute("DELETE FROM item_destinations WHERE inventory_id=?", (item_id,))
+        conn.execute("DELETE FROM inventory WHERE id=?",(item_id,))
     log(item_id,"ELIMINADO",row["item_name"] if row else "",user)
 
 def form(existing=None):
     e = existing or {}
     form_mode = "edit" if e else "new"
-    category_key = f"category_selector_{form_mode}_{e.get('id', 'new')}"
+    item_id = e.get("id")
+    category_key = f"category_selector_{form_mode}_{item_id or 'new'}"
     default_category = e.get("category", "Vinos y licores")
     category_options = list(CATEGORIES)
     default_index = category_options.index(default_category) if default_category in category_options else 0
 
     st.markdown("### Clasificación del artículo")
-    st.caption("Primero selecciona la categoría. La lista de subcategorías se actualizará automáticamente.")
-    category = st.selectbox(
-        "Categoría *",
-        category_options,
-        index=default_index,
-        key=category_key,
-    )
+    st.caption("Para alcohol, cada etiqueta se registra una sola vez y se distribuye entre áreas y destinos.")
+    category = st.selectbox("Categoría *", category_options, index=default_index, key=category_key)
     subs = CATEGORIES[category]
     saved_sub = e.get("subcategory", "")
     sub_default = saved_sub if saved_sub in subs else subs[0]
+    is_alcohol = category == "Vinos y licores"
+    saved_locations, saved_destinations = get_allocations(item_id, e)
 
-    with st.form(f"item_form_{form_mode}_{e.get('id', 'new')}", clear_on_submit=not bool(e)):
-        subcategory = st.selectbox(
-            "Subcategoría *",
-            subs,
-            index=subs.index(sub_default),
-            help=f"Opciones disponibles para {category}.",
-        )
+    with st.form(f"item_form_{form_mode}_{item_id or 'new'}", clear_on_submit=False):
+        subcategory = st.selectbox("Subcategoría *", subs, index=subs.index(sub_default))
         st.markdown("### Información principal")
         c1, c2 = st.columns([1.4, 1])
-        with c1:
-            name = st.text_input("Nombre del artículo *", value=e.get("item_name", ""))
-        with c2:
-            brand = st.text_input("Marca / fabricante", value=e.get("brand", ""))
-        description = st.text_area(
-            "Descripción",
-            value=e.get("description", ""),
-            placeholder="Modelo, presentación, color, medidas o características.",
-        )
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            qty = st.number_input("Cantidad *", min_value=0.0, step=1.0, value=float(e.get("quantity", 1) or 1))
-        unit_default = e.get("unit", "pieza(s)")
-        with c2:
-            unit = st.selectbox("Unidad", UNITS, index=UNITS.index(unit_default) if unit_default in UNITS else 0)
-        cond_default = e.get("condition_status", "Bueno")
-        with c3:
-            condition = st.selectbox("Estado físico", CONDITIONS, index=CONDITIONS.index(cond_default) if cond_default in CONDITIONS else 2)
+        with c1: name = st.text_input("Nombre del artículo *", value=e.get("item_name", ""), placeholder="Ej. Don Julio 70")
+        with c2: brand = st.text_input("Marca / fabricante", value=e.get("brand", ""))
+        description = st.text_area("Descripción", value=e.get("description", ""), placeholder="Presentación, tamaño, color o características.")
 
         c1, c2 = st.columns(2)
-        with c1:
-            current = st.text_input("Ubicación actual dentro de Camelia", value=e.get("current_area", ""), placeholder="Bar, cocina, almacén...")
-        with c2:
-            value = st.number_input("Valor estimado por unidad ($)", min_value=0.0, step=1.0, value=float(e.get("estimated_unit_value", 0) or 0))
+        unit_default = e.get("unit", "botella(s)" if is_alcohol else "pieza(s)")
+        with c1: unit = st.selectbox("Unidad", UNITS, index=UNITS.index(unit_default) if unit_default in UNITS else 0)
+        cond_default = e.get("condition_status", "Bueno")
+        with c2: condition = st.selectbox("Estado físico", CONDITIONS, index=CONDITIONS.index(cond_default) if cond_default in CONDITIONS else 2)
 
+        locations = {}
+        destinations_alloc = {}
+        other_area_name = ""
+        if is_alcohol:
+            st.markdown("### Ubicaciones dentro de Camelia")
+            st.caption("Escribe cuántas botellas hay en cada área. El total se calculará automáticamente.")
+            loc_cols = st.columns(2)
+            for idx, area in enumerate(ALCOHOL_AREAS):
+                with loc_cols[idx % 2]:
+                    locations[area] = st.number_input(area, min_value=0.0, step=1.0, value=float(saved_locations.get(area, 0)), key=f"loc_{item_id}_{idx}")
+            other_saved = next(((a, q) for a, q in saved_locations.items() if a not in ALCOHOL_AREAS), ("", 0.0))
+            c1, c2 = st.columns([1.4, 1])
+            with c1: other_area_name = st.text_input("Otro · nombre del área", value=other_saved[0], placeholder="Escribe el área manualmente")
+            with c2: other_qty = st.number_input("Cantidad en otra área", min_value=0.0, step=1.0, value=float(other_saved[1]), key=f"other_qty_{item_id}")
+            if other_area_name.strip() and other_qty > 0:
+                locations[other_area_name.strip()] = other_qty
+            total_qty = float(sum(locations.values()))
+            st.info(f"Total inventariado en ubicaciones: {total_qty:g} {unit}")
+
+            st.markdown("### Distribución por destino")
+            st.caption("Distribuye el total entre los destinos correspondientes.")
+            dest_cols = st.columns(2)
+            for idx, destination_name in enumerate(DESTINATIONS):
+                with dest_cols[idx % 2]:
+                    destinations_alloc[destination_name] = st.number_input(destination_name, min_value=0.0, step=1.0, value=float(saved_destinations.get(destination_name, 0)), key=f"dest_{item_id}_{idx}")
+            allocated_qty = float(sum(destinations_alloc.values()))
+            difference = total_qty - allocated_qty
+            if abs(difference) < 0.0001:
+                st.success(f"✓ Inventario correctamente distribuido: {allocated_qty:g} {unit}")
+            elif difference > 0:
+                st.warning(f"Faltan por asignar {difference:g} {unit}.")
+            else:
+                st.error(f"Los destinos exceden el inventario por {abs(difference):g} {unit}.")
+            qty = total_qty
+            current = "; ".join(f"{a}: {q:g}" for a, q in locations.items() if q > 0)
+            positive_dest = [(d, q) for d, q in destinations_alloc.items() if q > 0]
+            destination = positive_dest[0][0] if len(positive_dest) == 1 else ("Por definir" if not positive_dest else "Distribución múltiple")
+            dest_detail = "; ".join(f"{d}: {q:g}" for d, q in positive_dest)
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1: qty = st.number_input("Cantidad *", min_value=0.0, step=1.0, value=float(e.get("quantity", 1) or 1))
+            with c2: current = st.text_input("Ubicación actual dentro de Camelia", value=e.get("current_area", ""))
+            dest_default = e.get("destination", "Por definir")
+            with c3: destination = st.selectbox("¿A dónde se enviará? *", DESTINATIONS, index=DESTINATIONS.index(dest_default) if dest_default in DESTINATIONS else len(DESTINATIONS)-1)
+            dest_detail = st.text_input("Ubicación específica de destino", value=e.get("destination_detail", ""))
+
+        value = st.number_input("Valor estimado por unidad ($)", min_value=0.0, step=1.0, value=float(e.get("estimated_unit_value", 0) or 0))
         expiration = None
         lot = e.get("lot_number", "")
         if category in ["Alimentos", "Vinos y licores"]:
@@ -244,58 +344,40 @@ def form(existing=None):
             c1, c2 = st.columns(2)
             with c1:
                 has_exp = st.checkbox("Tiene fecha de caducidad / consumo preferente", value=bool(e.get("expiration_date")))
-                if has_exp:
-                    raw = e.get("expiration_date")
-                    default = parse_optional_date(raw, date.today() + timedelta(days=30))
-                    expiration = st.date_input("Fecha", value=default)
-            with c2:
-                lot = st.text_input("Lote", value=lot)
+                if has_exp: expiration = st.date_input("Fecha", value=parse_optional_date(e.get("expiration_date"), date.today() + timedelta(days=30)))
+            with c2: lot = st.text_input("Lote", value=lot)
 
-        st.markdown("### Destino y seguimiento")
+        st.markdown("### Seguimiento")
         c1, c2 = st.columns(2)
-        dest_default = e.get("destination", "Por definir")
         status_default = e.get("transfer_status", "Pendiente")
-        with c1:
-            destination = st.selectbox("¿A dónde se enviará? *", DESTINATIONS, index=DESTINATIONS.index(dest_default) if dest_default in DESTINATIONS else len(DESTINATIONS)-1)
-        with c2:
-            transfer_status = st.selectbox("Estatus del movimiento", STATUSES, index=STATUSES.index(status_default) if status_default in STATUSES else 0)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            dest_detail = st.text_input("Ubicación específica de destino", value=e.get("destination_detail", ""))
-        with c2:
-            responsible = st.text_input("Responsable de recibir / trasladar", value=e.get("responsible_person", ""))
-
+        with c1: transfer_status = st.selectbox("Estatus del movimiento", STATUSES, index=STATUSES.index(status_default) if status_default in STATUSES else 0)
+        with c2: responsible = st.text_input("Responsable de recibir / trasladar", value=e.get("responsible_person", ""))
         c1, c2 = st.columns(2)
         with c1:
             has_date = st.checkbox("Registrar fecha de movimiento", value=bool(e.get("transfer_date")))
-            transfer_date = None
-            if has_date:
-                raw = e.get("transfer_date")
-                default = parse_optional_date(raw, date.today())
-                transfer_date = st.date_input("Fecha de movimiento", value=default)
-        with c2:
-            photo = st.file_uploader("Fotografía del artículo", type=["png", "jpg", "jpeg", "webp"])
-
+            transfer_date = st.date_input("Fecha de movimiento", value=parse_optional_date(e.get("transfer_date"), date.today())) if has_date else None
+        with c2: photo = st.file_uploader("Fotografía del artículo", type=["png", "jpg", "jpeg", "webp"])
         notes = st.text_area("Notas", value=e.get("notes", ""))
         go = st.form_submit_button("Guardar artículo" if not e else "Actualizar artículo", type="primary", use_container_width=True)
 
-    if not go:
+    if not go: return
+    if not name.strip(): st.error("El nombre es obligatorio."); return
+    if is_alcohol and qty <= 0: st.error("Registra al menos una botella en alguna ubicación."); return
+    if is_alcohol and abs(qty - sum(destinations_alloc.values())) > 0.0001:
+        st.error("La suma de destinos debe ser igual al total inventariado en las ubicaciones."); return
+    dup = duplicate_candidates(name, brand, item_id)
+    if not dup.empty:
+        st.error(f"Ya existe un registro con el nombre ‘{name.strip()}’. Edita el registro existente para agregar ubicaciones o cantidades.")
         return
-    if not name.strip():
-        st.error("El nombre es obligatorio.")
-        return
-    photo_bytes = e.get("photo")
-    photo_name = e.get("photo_name", "")
-    if photo:
-        photo_bytes = photo.getvalue()
-        photo_name = photo.name
+    photo_bytes = e.get("photo"); photo_name = e.get("photo_name", "")
+    if photo: photo_bytes = photo.getvalue(); photo_name = photo.name
     return dict(
         category=category, subcategory=subcategory, item_name=name.strip(), description=description.strip(),
         quantity=qty, unit=unit, brand=brand.strip(), condition_status=condition, current_area=current.strip(),
         expiration_date=expiration, lot_number=lot.strip(), estimated_unit_value=value, destination=destination,
         destination_detail=dest_detail.strip(), transfer_status=transfer_status, responsible_person=responsible.strip(),
         transfer_date=transfer_date, notes=notes.strip(), photo=photo_bytes, photo_name=photo_name,
+        allocations_locations=locations if is_alcohol else {}, allocations_destinations=destinations_alloc if is_alcohol else {},
     )
 
 def metric(label,value,sub=""):
@@ -362,13 +444,19 @@ def filter_df(df,prefix):
     return out
 
 def view_df(df):
-    out=df.copy(); out["Cantidad"]=out.quantity.map(lambda x:f"{x:g}")+" "+out.unit.fillna(""); out["Caducidad"]=out.expiration_date.apply(lambda x:expiry(x)[0]); out["Valor total"]=(out.quantity*out.estimated_unit_value).map(lambda x:f"${x:,.2f}")
-    return out.rename(columns={"id":"ID","category":"Categoría","subcategory":"Tipo","item_name":"Artículo","brand":"Marca","condition_status":"Estado","current_area":"Ubicación actual","destination":"Destino","destination_detail":"Ubicación destino","transfer_status":"Movimiento","responsible_person":"Responsable","notes":"Notas"})
+    out=df.copy()
+    out["Cantidad"]=out.quantity.map(lambda x:f"{x:g}")+" "+out.unit.fillna("")
+    out["Caducidad"]=out.expiration_date.apply(lambda x:expiry(x)[0])
+    out["Valor total"]=(out.quantity*out.estimated_unit_value).map(lambda x:f"${x:,.2f}")
+    out["Ubicación actual"] = out["location_summary"] if "location_summary" in out.columns else out.current_area
+    out["Destino"] = out["destination_summary"] if "destination_summary" in out.columns else out.destination
+    out["Estado inventario"] = out["inventory_status"] if "inventory_status" in out.columns else "🟢 Completo"
+    return out.rename(columns={"id":"ID","category":"Categoría","subcategory":"Tipo","item_name":"Artículo","brand":"Marca","condition_status":"Estado","destination_detail":"Ubicación destino","transfer_status":"Movimiento","responsible_person":"Responsable","notes":"Notas"})
 
 def inventory(df,admin):
     st.markdown("## Inventario"); f=filter_df(df,"inv_")
     if f.empty: st.info("No hay artículos que coincidan con los filtros."); return
-    v=view_df(f); cols=["ID","Categoría","Tipo","Artículo","Marca","Cantidad","Estado","Ubicación actual","Caducidad","Destino","Ubicación destino","Movimiento","Responsable","Valor total","Notas"]
+    v=view_df(f); cols=["ID","Categoría","Tipo","Artículo","Marca","Cantidad","Estado inventario","Estado","Ubicación actual","Caducidad","Destino","Ubicación destino","Movimiento","Responsable","Valor total","Notas"]
     st.dataframe(v[cols],use_container_width=True,hide_index=True,height=520,column_config={"ID":st.column_config.NumberColumn(width="small"),"Artículo":st.column_config.TextColumn(width="large"),"Notas":st.column_config.TextColumn(width="large")})
     st.caption(f"Mostrando {len(f)} de {len(df)} registros.")
     if admin:
@@ -566,8 +654,10 @@ def main():
     df = load_df()
 
     if role == "guest":
-        guest_df = df[df.destination.eq("Camelia · permanece en el local")].copy()
-        # Defensa adicional: se eliminan los valores antes de entregar los datos a las vistas del invitado.
+        guest_df = df[df["camelia_quantity"].gt(0)].copy()
+        guest_df["quantity"] = guest_df["camelia_quantity"]
+        guest_df["destination"] = "Camelia · permanece en el local"
+        guest_df["destination_summary"] = "Camelia · permanece en el local"
         guest_df["estimated_unit_value"] = 0
         options = ["Inicio", "Inventario incluido", "Documento de entrega"]
         page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
@@ -588,6 +678,7 @@ def main():
         dashboard(df)
     elif page == "Registrar artículo":
         st.markdown("## Registrar nuevo artículo")
+        st.caption("Para vinos y licores, registra una sola ficha por etiqueta y reparte las cantidades entre áreas y destinos.")
         values = form()
         if values:
             sid = save_item(values, st.session_state.user["name"])
