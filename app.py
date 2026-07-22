@@ -451,8 +451,8 @@ def guest_dashboard(df):
     st.markdown(
         "<div class='hero'><small>Camelia Modern Mexican Cuisine</small>"
         "<h1>Inventario incluido en el traspaso</h1>"
-        "<p>Consulta de los artículos que permanecerán dentro del restaurante Camelia. "
-        "Esta vista no muestra precios ni información de otros destinos.</p></div>",
+        "<p>La siguiente información corresponde al inventario que forma parte "
+        "del proceso de entrega de Camelia.</p></div>",
         unsafe_allow_html=True,
     )
     total = len(df)
@@ -477,16 +477,11 @@ def guest_dashboard(df):
         Registros=("id", "count"), Cantidad=("quantity", "sum")
     ).rename(columns={"category": "Categoría"})
     st.dataframe(summary, use_container_width=True, hide_index=True)
-    st.markdown(
-        "<div class='note'>🔒 Vista de consulta. Los valores económicos, el inventario destinado "
-        "a otros restaurantes y las herramientas administrativas permanecen ocultos.</div>",
-        unsafe_allow_html=True,
-    )
 
 
 def guest_inventory(df):
-    st.markdown("## Inventario que permanece en Camelia")
-    st.caption("Consulta exclusiva de los artículos incluidos en el traspaso. Sin precios y sin permisos de edición.")
+    st.markdown("## Inventario incluido")
+    st.caption("Relación detallada de los artículos que forman parte de la entrega de Camelia.")
     filtered = filter_df(df, "guest_inv_")
     if filtered.empty:
         st.info("No hay artículos que coincidan con los filtros.")
@@ -529,17 +524,16 @@ def guest_inventory(df):
 
 
 def guest_reports(df):
-    st.markdown("## Documento de inventario para revisión")
+    st.markdown("## Documento de entrega")
     st.markdown(
-        "<div class='note'>Descarga una relación únicamente de los artículos que permanecerán "
-        "en Camelia. El archivo no contiene precios ni información administrativa.</div>",
+        "<div class='note'>Descarga la relación de artículos incluidos en el proceso de entrega de Camelia.</div>",
         unsafe_allow_html=True,
     )
     if df.empty:
         st.info("No hay artículos disponibles para descargar.")
         return
     st.download_button(
-        "Descargar inventario sin precios",
+        "Descargar inventario de entrega",
         guest_excel_data(df),
         f"Inventario_Entrega_Camelia_{date.today().isoformat()}.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -575,11 +569,11 @@ def main():
         guest_df = df[df.destination.eq("Camelia · permanece en el local")].copy()
         # Defensa adicional: se eliminan los valores antes de entregar los datos a las vistas del invitado.
         guest_df["estimated_unit_value"] = 0
-        options = ["Resumen", "Inventario", "Documento de entrega"]
+        options = ["Inicio", "Inventario incluido", "Documento de entrega"]
         page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
-        if page == "Resumen":
+        if page == "Inicio":
             guest_dashboard(guest_df)
-        elif page == "Inventario":
+        elif page == "Inventario incluido":
             guest_inventory(guest_df)
         else:
             guest_reports(guest_df)
