@@ -23,6 +23,8 @@ ADMIN_USER = os.getenv("CAMELIA_ADMIN_USER", "administrador")
 ADMIN_PIN = os.getenv("CAMELIA_ADMIN_PIN", "5866")
 OWNER_USER = os.getenv("CAMELIA_OWNER_USER", "Camelia Robles")
 OWNER_PIN = os.getenv("CAMELIA_OWNER_PIN", "7319")
+GUEST_USER = os.getenv("CAMELIA_GUEST_USER", "Invitado")
+GUEST_PIN = os.getenv("CAMELIA_GUEST_PIN", "2026")
 
 CATEGORIES = {
     "Vinos y licores": ["Tequila", "Mezcal", "Whiskey", "Vodka", "Ron", "Ginebra", "Brandy / Cognac", "Vino tinto", "Vino blanco", "Vino rosado", "Espumoso / Champagne", "Licores y cremas", "Cerveza", "Otros"],
@@ -112,6 +114,7 @@ def authenticate(user,pin):
     u=user.strip().lower()
     if u==ADMIN_USER.lower() and h(pin)==h(ADMIN_PIN): return {"name":"Administrador","role":"admin"}
     if u == OWNER_USER.lower() and h(pin)==h(OWNER_PIN): return {"name":"Camelia Robles","role":"viewer"}
+    if u == GUEST_USER.lower() and h(pin)==h(GUEST_PIN): return {"name":"Invitado","role":"guest"}
 
 def login():
     st.markdown("<div style='height:2vh'></div>", unsafe_allow_html=True)
@@ -139,13 +142,13 @@ def login():
         with st.form("login", clear_on_submit=False):
             profile = st.selectbox(
                 "Usuario",
-                ["Camelia Robles", "Administrador"],
+                ["Camelia Robles", "Administrador", "Invitado"],
                 index=0,
             )
             pin = st.text_input("PIN de acceso", type="password", placeholder="Ingresa tu PIN")
             go = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
         if go:
-            login_user = OWNER_USER if profile == "Camelia Robles" else ADMIN_USER
+            login_user = OWNER_USER if profile == "Camelia Robles" else ADMIN_USER if profile == "Administrador" else GUEST_USER
             user_profile = authenticate(login_user, pin)
             if user_profile:
                 st.session_state.user = user_profile
@@ -415,25 +418,196 @@ def reports(df):
     with db() as conn: audit=pd.read_sql_query("SELECT action,detail,user_name,created_at FROM audit_log ORDER BY id DESC LIMIT 200",conn)
     if not audit.empty: st.dataframe(audit.rename(columns={"action":"Acción","detail":"Detalle","user_name":"Usuario","created_at":"Fecha"}),use_container_width=True,hide_index=True)
 
+
+def guest_excel_data(df):
+    """Excel de consulta para el interesado, sin precios ni datos administrativos."""
+    out = io.BytesIO()
+    visible = df.drop(
+        columns=[
+            "estimated_unit_value", "photo", "photo_name", "created_at", "updated_at",
+            "created_by", "responsible_person", "transfer_date", "destination_detail",
+        ],
+        errors="ignore",
+    ).copy()
+    visible = visible.rename(columns={
+        "id": "ID", "category": "Categoría", "subcategory": "Tipo",
+        "item_name": "Artículo", "description": "Descripción", "quantity": "Cantidad",
+        "unit": "Unidad", "brand": "Marca", "condition_status": "Estado",
+        "current_area": "Ubicación actual", "expiration_date": "Caducidad",
+        "lot_number": "Lote", "destination": "Destino",
+        "transfer_status": "Estatus", "notes": "Notas",
+    })
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        visible.to_excel(writer, index=False, sheet_name="Inventario Camelia")
+        df.groupby("category", as_index=False).agg(
+            Registros=("id", "count"), Cantidad=("quantity", "sum")
+        ).rename(columns={"category": "Categoría"}).to_excel(
+            writer, index=False, sheet_name="Resumen categorías"
+        )
+    return out.getvalue()
+
+
+def guest_dashboard(df):
+    st.markdown(
+        "<div class='hero'><small>Camelia Modern Mexican Cuisine</small>"
+        "<h1>Inventario incluido en el traspaso</h1>"
+        "<p>Consulta de los artículos que permanecerán dentro del restaurante Camelia. "
+        "Esta vista no muestra precios ni información de otros destinos.</p></div>",
+        unsafe_allow_html=True,
+    )
+    total = len(df)
+    units = df.quantity.sum() if total else 0
+    categories = df.category.nunique() if total else 0
+    conditions = df.condition_status.nunique() if total else 0
+    cols = st.columns(4)
+    values = [
+        ("Registros", total, "Artículos incluidos"),
+        ("Unidades", f"{units:,.0f}", "Suma de cantidades"),
+        ("Categorías", categories, "Tipos de inventario"),
+        ("Condiciones", conditions, "Estados registrados"),
+    ]
+    for col, value in zip(cols, values):
+        with col:
+            metric(*value)
+    st.markdown("### Resumen por categoría")
+    if df.empty:
+        st.info("Todavía no hay artículos marcados para permanecer en Camelia.")
+        return
+    summary = df.groupby("category", as_index=False).agg(
+        Registros=("id", "count"), Cantidad=("quantity", "sum")
+    ).rename(columns={"category": "Categoría"})
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.markdown(
+        "<div class='note'>🔒 Vista de consulta. Los valores económicos, el inventario destinado "
+        "a otros restaurantes y las herramientas administrativas permanecen ocultos.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def guest_inventory(df):
+    st.markdown("## Inventario que permanece en Camelia")
+    st.caption("Consulta exclusiva de los artículos incluidos en el traspaso. Sin precios y sin permisos de edición.")
+    filtered = filter_df(df, "guest_inv_")
+    if filtered.empty:
+        st.info("No hay artículos que coincidan con los filtros.")
+        return
+    view = view_df(filtered)
+    columns = [
+        "ID", "Categoría", "Tipo", "Artículo", "Marca", "Cantidad", "Estado",
+        "Ubicación actual", "Caducidad", "Movimiento", "Notas",
+    ]
+    st.dataframe(
+        view[columns], use_container_width=True, hide_index=True, height=520,
+        column_config={
+            "ID": st.column_config.NumberColumn(width="small"),
+            "Artículo": st.column_config.TextColumn(width="large"),
+            "Notas": st.column_config.TextColumn(width="large"),
+        },
+    )
+    st.caption(f"Mostrando {len(filtered)} de {len(df)} registros incluidos en Camelia.")
+
+    st.markdown("### Fotografías y detalle")
+    for _, row in filtered.iterrows():
+        title = f"#{int(row.id)} · {row.item_name} · {row.quantity:g} {row.unit}"
+        with st.expander(title):
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                photo = row.get("photo")
+                if photo is not None and not pd.isna(photo):
+                    st.image(photo, use_container_width=True)
+                else:
+                    st.caption("Sin fotografía registrada.")
+            with c2:
+                st.markdown(f"**Categoría:** {row.category} · {row.subcategory}")
+                st.markdown(f"**Marca:** {row.brand or 'Sin marca'}")
+                st.markdown(f"**Condición:** {row.condition_status}")
+                st.markdown(f"**Ubicación actual:** {row.current_area or 'No especificada'}")
+                if row.description:
+                    st.markdown(f"**Descripción:** {row.description}")
+                if row.notes:
+                    st.markdown(f"**Notas:** {row.notes}")
+
+
+def guest_reports(df):
+    st.markdown("## Documento de inventario para revisión")
+    st.markdown(
+        "<div class='note'>Descarga una relación únicamente de los artículos que permanecerán "
+        "en Camelia. El archivo no contiene precios ni información administrativa.</div>",
+        unsafe_allow_html=True,
+    )
+    if df.empty:
+        st.info("No hay artículos disponibles para descargar.")
+        return
+    st.download_button(
+        "Descargar inventario sin precios",
+        guest_excel_data(df),
+        f"Inventario_Entrega_Camelia_{date.today().isoformat()}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    st.markdown(
+        f"### Resumen de entrega\n- Fecha: {date.today().strftime('%d/%m/%Y')}"
+        f"\n- Registros incluidos: {len(df)}"
+        f"\n- Cantidad total: {df.quantity.sum():,.0f}"
+        f"\n- Categorías: {df.category.nunique()}"
+    )
+
 def main():
     init_db()
-    if "user" not in st.session_state: login(); return
-    st.markdown(f"<div class='top-logo-wrap'>{camelia_logo_html()}</div>", unsafe_allow_html=True)
-    c1,c2=st.columns([4,1])
-    with c1: st.caption(f"Sesión: {st.session_state.user['name']} · {st.session_state.user['role'].upper()}")
-    with c2:
-        if st.button("Cerrar sesión",use_container_width=True): st.session_state.pop("user",None); st.rerun()
-    df=load_df(); admin=st.session_state.user["role"]=="admin"; options=["Resumen","Inventario","Destinos","Caducidades","Reportes"]
-    if admin: options.insert(1,"Registrar artículo")
-    page=st.radio("Navegación",options,horizontal=True,label_visibility="collapsed")
-    if page=="Resumen": dashboard(df)
-    elif page=="Registrar artículo":
-        st.markdown("## Registrar nuevo artículo"); v=form()
-        if v: sid=save_item(v,st.session_state.user["name"]); st.success(f"Artículo guardado con folio #{sid}."); st.rerun()
-    elif page=="Inventario": inventory(df,admin)
-    elif page=="Destinos": destinations(df)
-    elif page=="Caducidades": expirations(df)
-    else: reports(df)
+    if "user" not in st.session_state:
+        login()
+        return
 
-if __name__=="__main__":
+    st.markdown(f"<div class='top-logo-wrap'>{camelia_logo_html()}</div>", unsafe_allow_html=True)
+    c1, c2 = st.columns([4, 1])
+    role = st.session_state.user["role"]
+    role_label = {"admin": "ADMINISTRADOR", "viewer": "PROPIETARIA", "guest": "INVITADO"}.get(role, role.upper())
+    with c1:
+        st.caption(f"Sesión: {st.session_state.user['name']} · {role_label}")
+    with c2:
+        if st.button("Cerrar sesión", use_container_width=True):
+            st.session_state.pop("user", None)
+            st.rerun()
+
+    df = load_df()
+
+    if role == "guest":
+        guest_df = df[df.destination.eq("Camelia · permanece en el local")].copy()
+        # Defensa adicional: se eliminan los valores antes de entregar los datos a las vistas del invitado.
+        guest_df["estimated_unit_value"] = 0
+        options = ["Resumen", "Inventario", "Documento de entrega"]
+        page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
+        if page == "Resumen":
+            guest_dashboard(guest_df)
+        elif page == "Inventario":
+            guest_inventory(guest_df)
+        else:
+            guest_reports(guest_df)
+        return
+
+    admin = role == "admin"
+    options = ["Resumen", "Inventario", "Destinos", "Caducidades", "Reportes"]
+    if admin:
+        options.insert(1, "Registrar artículo")
+    page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
+    if page == "Resumen":
+        dashboard(df)
+    elif page == "Registrar artículo":
+        st.markdown("## Registrar nuevo artículo")
+        values = form()
+        if values:
+            sid = save_item(values, st.session_state.user["name"])
+            st.success(f"Artículo guardado con folio #{sid}.")
+            st.rerun()
+    elif page == "Inventario":
+        inventory(df, admin)
+    elif page == "Destinos":
+        destinations(df)
+    elif page == "Caducidades":
+        expirations(df)
+    else:
+        reports(df)
+
+
+if __name__ == "__main__":
     main()
