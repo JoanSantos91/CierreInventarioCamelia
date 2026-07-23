@@ -932,22 +932,77 @@ def guest_excel_data(df):
 
 
 def guest_dashboard(df):
-    st.markdown("<div class='hero'><small>Dossier de traspaso · V11 Executive</small><h1>Inventario incluido en Camelia</h1><p>Vista ejecutiva de los artículos, cantidades, precios y valores que permanecen en el establecimiento.</p></div>",unsafe_allow_html=True)
-    total=len(df); units=float(df.quantity.sum()) if total else 0; value=float((df.quantity*df.estimated_unit_value).sum()) if total else 0; cats=int(df.category.nunique()) if total else 0
-    for col,data in zip(st.columns(4),[("Artículos",f"{total:,}","Registros incluidos"),("Unidades",f"{units:,.0f}","Existencia entregada"),("Categorías",f"{cats:,}","Tipos de inventario"),("Valor total",f"${value:,.2f}","Valor estimado")]):
-        with col: metric(*data)
-    if df.empty: st.info("Todavía no hay artículos incluidos."); return
-    summary=df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor","sum")).sort_values("Valor",ascending=False)
-    st.markdown("<div class='v10-section'><small>Composición del inventario</small><h2>Resumen por categoría</h2></div>",unsafe_allow_html=True)
-    _v10_category_cards(summary,value)
-    c1,c2=st.columns([1.25,1])
-    with c1:
-        st.markdown("#### Valor por categoría")
-        _horizontal_value_chart(summary, value, 12)
-    with c2:
-        st.markdown("#### Principales artículos")
-        top=df.assign(Valor=df.quantity*df.estimated_unit_value).sort_values("Valor",ascending=False).head(8)
-        st.dataframe(top[["item_name","quantity","Valor"]].rename(columns={"item_name":"Artículo","quantity":"Cantidad"}),hide_index=True,use_container_width=True,height=390,column_config={"Valor":st.column_config.NumberColumn(format="$%.2f")})
+    st.markdown(
+        "<div class='hero'><small>Dossier de traspaso · V11 Executive</small>"
+        "<h1>Inventario incluido en Camelia</h1>"
+        "<p>Vista ejecutiva de los artículos y cantidades que permanecen en el establecimiento.</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    total = len(df)
+    units = float(df["quantity"].sum()) if total else 0
+    cats = int(df["category"].nunique()) if total else 0
+
+    for col, data in zip(
+        st.columns(3),
+        [
+            ("Artículos", f"{total:,}", "Registros incluidos"),
+            ("Unidades", f"{units:,.0f}", "Existencia entregada"),
+            ("Categorías", f"{cats:,}", "Tipos de inventario"),
+        ],
+    ):
+        with col:
+            metric(*data)
+
+    if df.empty:
+        st.info("Todavía no hay artículos incluidos.")
+        return
+
+    summary = (
+        df.groupby("category", as_index=False)
+        .agg(Registros=("id", "count"), Cantidad=("quantity", "sum"))
+        .sort_values(["Cantidad", "Registros"], ascending=False)
+    )
+
+    st.markdown(
+        "<div class='v10-section'><small>Composición del inventario</small>"
+        "<h2>Resumen por categoría</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+    card_cols = st.columns(3)
+    for index, row in summary.head(12).reset_index(drop=True).iterrows():
+        with card_cols[index % 3]:
+            st.markdown(
+                f"<div class='summary-card'>"
+                f"<small>{row['category']}</small>"
+                f"<h3>{float(row['Cantidad']):,.0f}</h3>"
+                f"<p>{int(row['Registros']):,} artículo(s)</p>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("#### Cantidad por categoría")
+    chart_data = summary.rename(
+        columns={"category": "Categoría", "Cantidad": "Unidades"}
+    ).set_index("Categoría")[["Unidades"]]
+    st.bar_chart(chart_data, horizontal=True, use_container_width=True)
+
+    st.markdown("#### Principales artículos por cantidad")
+    top = df.sort_values("quantity", ascending=False).head(10)
+    st.dataframe(
+        top[["item_name", "category", "quantity", "unit"]].rename(
+            columns={
+                "item_name": "Artículo",
+                "category": "Categoría",
+                "quantity": "Cantidad",
+                "unit": "Unidad",
+            }
+        ),
+        hide_index=True,
+        use_container_width=True,
+        height=390,
+    )
 
 def guest_reports(df):
     st.markdown(
@@ -1010,7 +1065,7 @@ def guest_reports(df):
 
 def guest_inventory(df):
     st.markdown("## Inventario incluido")
-    st.caption("Selecciona un artículo para consultar su fotografía y la información disponible. Los precios no son visibles para el invitado.")
+    st.caption("Selecciona un artículo para consultar su fotografía y la información disponible. La información monetaria está oculta para el invitado.")
     filtered = filter_df(df, "guest_inv_")
     if filtered.empty:
         st.info("No hay artículos que coincidan con los filtros.")
@@ -1088,8 +1143,9 @@ def main():
         guest_df["quantity"] = guest_df["camelia_quantity"]
         guest_df["destination"] = "Camelia · permanece en el local"
         guest_df["destination_summary"] = "Camelia · permanece en el local"
-        # Protección adicional: la copia del invitado nunca conserva valores monetarios.
-        guest_df["estimated_unit_value"] = 0.0
+        # Protección adicional: la vista del invitado no recibe la columna de precios.
+        # Así no puede mostrarse accidentalmente "Valor estimado", precio unitario ni valor total.
+        guest_df = guest_df.drop(columns=["estimated_unit_value"], errors="ignore")
         options = ["Inicio", "Inventario incluido", "Documento de entrega"]
         page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
         if page == "Inicio":
