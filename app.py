@@ -582,16 +582,301 @@ def excel_data(df):
         x.to_excel(w,index=False,sheet_name="Inventario"); x.groupby("destination",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum")).to_excel(w,index=False,sheet_name="Resumen destinos"); x.groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum")).to_excel(w,index=False,sheet_name="Resumen categorías")
     return out.getvalue()
 
-def reports(df):
-    st.markdown("## Reportes y entrega final"); st.markdown("<div class='note'>Descarga una copia completa del inventario para revisión, firma o respaldo.</div>",unsafe_allow_html=True)
-    if df.empty: st.info("El inventario está vacío."); return
-    c1,c2=st.columns(2)
-    with c1: st.download_button("Descargar inventario en Excel",excel_data(df),f"Inventario_Camelia_{date.today().isoformat()}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
-    with c2: st.download_button("Descargar respaldo CSV",df.drop(columns=["photo"],errors="ignore").to_csv(index=False).encode("utf-8-sig"),f"Inventario_Camelia_{date.today().isoformat()}.csv","text/csv",use_container_width=True)
-    total=(df.quantity*df.estimated_unit_value).sum(); done=df.transfer_status.isin(["Entregado","Permanece en Camelia"]).sum(); st.markdown(f"### Resumen para cierre\n- Fecha: {date.today().strftime('%d/%m/%Y')}\n- Registros: {len(df)}\n- Cantidad total: {df.quantity.sum():,.0f}\n- Movimientos concluidos: {done}\n- Pendientes: {len(df)-done}\n- Valor estimado: ${total:,.2f}")
-    with db() as conn: audit=pd.read_sql_query("SELECT action,detail,user_name,created_at FROM audit_log ORDER BY id DESC LIMIT 200",conn)
-    if not audit.empty: st.dataframe(audit.rename(columns={"action":"Acción","detail":"Detalle","user_name":"Usuario","created_at":"Fecha"}),use_container_width=True,hide_index=True)
+def _pdf_safe(value):
+    """Convierte texto a caracteres compatibles con las fuentes PDF estándar."""
+    text = str(value if value is not None else "")
+    replacements = {
+        "á":"a", "é":"e", "í":"i", "ó":"o", "ú":"u", "ü":"u", "ñ":"n",
+        "Á":"A", "É":"E", "Í":"I", "Ó":"O", "Ú":"U", "Ü":"U", "Ñ":"N",
+        "·":"-", "–":"-", "—":"-", "“":"\"", "”":"\"", "’":"'", "…":"...",
+        "🟢":"OK", "🟡":"PENDIENTE", "🔴":"ERROR"
+    }
+    for old, new_value in replacements.items():
+        text = text.replace(old, new_value)
+    return text.encode("latin-1", "replace").decode("latin-1")
 
+
+def _pdf_escape(text):
+    return _pdf_safe(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _pdf_text_width(text, size):
+    # Aproximación suficiente para truncar texto con Helvetica.
+    return len(_pdf_safe(text)) * size * 0.50
+
+
+def _pdf_trim(text, max_width, size):
+    text = _pdf_safe(text)
+    if _pdf_text_width(text, size) <= max_width:
+        return text
+    while text and _pdf_text_width(text + "...", size) > max_width:
+        text = text[:-1]
+    return text.rstrip() + "..."
+
+
+def _simple_pdf_document(df, title):
+    """Genera un PDF válido usando únicamente Python estándar.
+
+    Este generador funciona incluso cuando ReportLab no está instalado. El comprador
+    solo necesita abrir la aplicación en su navegador y pulsar Descargar PDF.
+    """
+    page_w, page_h = 792.0, 612.0  # Letter horizontal
+    margin = 32.0
+    charcoal = (0.129, 0.122, 0.106)
+    gold = (0.788, 0.678, 0.412)
+    cream = (0.965, 0.945, 0.902)
+    gray = (0.42, 0.39, 0.35)
+    white = (1, 1, 1)
+    pages = []
+
+    def color_cmd(rgb, stroke=False):
+        op = "RG" if stroke else "rg"
+        return f"{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} {op}"
+
+    def rect(cmds, x, y, w, h, fill, stroke=None, width=1):
+        cmds.append(color_cmd(fill))
+        if stroke:
+            cmds.append(color_cmd(stroke, True)); cmds.append(f"{width} w")
+            cmds.append(f"{x:.2f} {y:.2f} {w:.2f} {h:.2f} re B")
+        else:
+            cmds.append(f"{x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
+
+    def text(cmds, x, y, value, size=10, bold=False, rgb=charcoal, align="left", max_width=None):
+        value = _pdf_safe(value)
+        if max_width is not None:
+            value = _pdf_trim(value, max_width, size)
+        width = _pdf_text_width(value, size)
+        if align == "center": x -= width / 2
+        elif align == "right": x -= width
+        font = "F2" if bold else "F1"
+        cmds.extend(["BT", color_cmd(rgb), f"/{font} {size:.2f} Tf", f"1 0 0 1 {x:.2f} {y:.2f} Tm", f"({_pdf_escape(value)}) Tj", "ET"])
+
+    def footer(cmds, page_number):
+        cmds.append(color_cmd(gold, True)); cmds.append("0.8 w")
+        cmds.append(f"{margin} 23 m {page_w-margin} 23 l S")
+        text(cmds, margin, 10, "CAMELIA MODERN MEXICAN CUISINE - INVENTARIO V10 PREMIUM", 7.5, rgb=gray)
+        text(cmds, page_w-margin, 10, f"Pagina {page_number}", 7.5, rgb=gray, align="right")
+
+    value = float((df.quantity * df.estimated_unit_value).sum()) if len(df) else 0.0
+    units = float(df.quantity.sum()) if len(df) else 0.0
+    categories = int(df.category.nunique()) if len(df) else 0
+
+    # Portada
+    cmds = []
+    rect(cmds, 0, 0, page_w, page_h, cream)
+    rect(cmds, 0, page_h-118, page_w, 118, charcoal)
+    rect(cmds, margin, page_h-92, 7, 56, gold)
+    text(cmds, margin+22, page_h-55, "CAMELIA", 30, bold=True, rgb=white)
+    text(cmds, margin+22, page_h-78, "MODERN MEXICAN CUISINE", 11, bold=True, rgb=gold)
+    text(cmds, page_w-margin, page_h-55, "DOSSIER EJECUTIVO", 10, bold=True, rgb=gold, align="right")
+    text(cmds, page_w/2, 417, title, 25, bold=True, rgb=charcoal, align="center", max_width=680)
+    text(cmds, page_w/2, 393, "Inventario profesional para revision, entrega y traspaso", 11, rgb=gray, align="center")
+
+    labels = [("ARTICULOS", f"{len(df):,}"), ("UNIDADES", f"{units:,.0f}"), ("CATEGORIAS", f"{categories:,}"), ("VALOR ESTIMADO", f"${value:,.2f}")]
+    box_w = (page_w-2*margin-24)/4
+    for i, (label, number) in enumerate(labels):
+        x = margin + i*(box_w+8)
+        rect(cmds, x, 270, box_w, 82, white, gold, .8)
+        rect(cmds, x, 326, box_w, 26, charcoal)
+        text(cmds, x+box_w/2, 336, label, 8, bold=True, rgb=white, align="center")
+        text(cmds, x+box_w/2, 291, number, 16, bold=True, rgb=charcoal, align="center", max_width=box_w-12)
+    text(cmds, page_w/2, 222, datetime.now().strftime("Emitido el %d/%m/%Y a las %H:%M"), 9, rgb=gray, align="center")
+    text(cmds, page_w/2, 181, "Documento generado directamente desde la aplicacion Camelia.", 9, rgb=gray, align="center")
+    footer(cmds, 1)
+    pages.append("\n".join(cmds))
+
+    # Resumen por categoría
+    summary = df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(
+        Registros=("id","count"), Cantidad=("quantity","sum"), Valor=("Valor","sum")
+    ).sort_values("Valor",ascending=False) if len(df) else pd.DataFrame(columns=["category","Registros","Cantidad","Valor"])
+
+    rows_per_page = 18
+    summary_rows = list(summary.itertuples(index=False)) or []
+    for chunk_start in range(0, max(len(summary_rows),1), rows_per_page):
+        chunk = summary_rows[chunk_start:chunk_start+rows_per_page]
+        cmds=[]
+        rect(cmds, 0, 0, page_w, page_h, white)
+        rect(cmds, 0, page_h-66, page_w, 66, charcoal)
+        text(cmds, margin, page_h-42, "RESUMEN POR CATEGORIA", 18, bold=True, rgb=white)
+        text(cmds, page_w-margin, page_h-40, f"Valor total ${value:,.2f}", 10, bold=True, rgb=gold, align="right")
+        headers=[("Categoria",330),("Registros",85),("Cantidad",100),("Valor",125),("Participacion",100)]
+        y=500; x=margin
+        rect(cmds, margin, y, page_w-2*margin, 28, charcoal)
+        for label,w in headers:
+            text(cmds,x+6,y+9,label,8,bold=True,rgb=white,max_width=w-12); x+=w
+        y-=28
+        if not chunk:
+            text(cmds,margin+10,y-20,"No hay registros disponibles.",10,rgb=gray)
+        for idx,r in enumerate(chunk):
+            fill=cream if idx%2 else white
+            rect(cmds,margin,y-25,page_w-2*margin,25,fill)
+            vals=[r.category, int(r.Registros), f"{float(r.Cantidad):,.2f}", f"${float(r.Valor):,.2f}", f"{(float(r.Valor)/value*100 if value else 0):.1f}%"]
+            widths=[330,85,100,125,100]; x=margin
+            for j,(val,w) in enumerate(zip(vals,widths)):
+                align="left" if j==0 else "right"
+                tx=x+6 if align=="left" else x+w-7
+                text(cmds,tx,y-16,val,8,rgb=charcoal,align=align,max_width=w-12); x+=w
+            cmds.append(color_cmd((.84,.80,.69),True)); cmds.append("0.25 w"); cmds.append(f"{margin} {y-25} m {page_w-margin} {y-25} l S")
+            y-=25
+        footer(cmds,len(pages)+1); pages.append("\n".join(cmds))
+
+    # Detalle
+    ordered = df.sort_values(["category","item_name"]) if len(df) else df
+    detail_rows = list(ordered.itertuples(index=False))
+    rows_per_page=22
+    for chunk_start in range(0,max(len(detail_rows),1),rows_per_page):
+        chunk=detail_rows[chunk_start:chunk_start+rows_per_page]
+        cmds=[]; rect(cmds,0,0,page_w,page_h,white); rect(cmds,0,page_h-66,page_w,66,charcoal)
+        text(cmds,margin,page_h-42,"DETALLE DEL INVENTARIO",18,bold=True,rgb=white)
+        text(cmds,page_w-margin,page_h-40,f"Registros {chunk_start+1}-{min(chunk_start+len(chunk),len(detail_rows))} de {len(detail_rows)}",9,bold=True,rgb=gold,align="right")
+        headers=[("ID",34),("Categoria",90),("Articulo",185),("Marca",90),("Cant.",45),("Unidad",55),("Precio",75),("Total",82),("Estado",78)]
+        y=500; x=margin; rect(cmds,margin,y,page_w-2*margin,25,charcoal)
+        for label,w in headers:
+            text(cmds,x+4,y+8,label,7,bold=True,rgb=white,max_width=w-8); x+=w
+        y-=25
+        if not chunk: text(cmds,margin+10,y-20,"No hay registros disponibles.",10,rgb=gray)
+        for idx,r in enumerate(chunk):
+            q=float(getattr(r,"quantity",0) or 0); price=float(getattr(r,"estimated_unit_value",0) or 0)
+            vals=[getattr(r,"id",""),getattr(r,"category",""),getattr(r,"item_name",""),getattr(r,"brand","") or "",f"{q:g}",getattr(r,"unit",""),f"${price:,.2f}",f"${q*price:,.2f}",getattr(r,"condition_status","")]
+            widths=[34,90,185,90,45,55,75,82,78]
+            rect(cmds,margin,y-20,page_w-2*margin,20,cream if idx%2 else white)
+            x=margin
+            for j,(val,w) in enumerate(zip(vals,widths)):
+                align="right" if j in (0,4,6,7) else "left"
+                tx=x+w-4 if align=="right" else x+4
+                text(cmds,tx,y-13,val,6.8,rgb=charcoal,align=align,max_width=w-8); x+=w
+            cmds.append(color_cmd((.86,.83,.75),True)); cmds.append("0.2 w"); cmds.append(f"{margin} {y-20} m {page_w-margin} {y-20} l S")
+            y-=20
+        footer(cmds,len(pages)+1); pages.append("\n".join(cmds))
+
+    # Construcción PDF 1.4 con streams sin compresión.
+    objects=[]
+    objects.append("<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(None)  # Pages se completa al final
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    page_refs=[]
+    for content in pages:
+        stream=content.encode("latin-1","replace")
+        content_obj=len(objects)+1
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n" + stream.decode("latin-1") + "\nendstream")
+        page_obj=len(objects)+1
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:g} {page_h:g}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_obj} 0 R >>")
+        page_refs.append(f"{page_obj} 0 R")
+    objects[1]=f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>"
+    output=io.BytesIO(); output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets=[0]
+    for i,obj in enumerate(objects,1):
+        offsets.append(output.tell()); output.write(f"{i} 0 obj\n".encode("ascii")); output.write(obj.encode("latin-1","replace")); output.write(b"\nendobj\n")
+    xref=output.tell(); output.write(f"xref\n0 {len(objects)+1}\n".encode("ascii")); output.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]: output.write(f"{off:010d} 00000 n \n".encode("ascii"))
+    output.write(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode("ascii"))
+    return output.getvalue()
+
+
+def _v10_pdf(df,title):
+    """Usa ReportLab cuando está disponible y un generador integrado como respaldo."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape, letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image
+    except ImportError:
+        return _simple_pdf_document(df,title)
+    try:
+        output=io.BytesIO(); size=landscape(letter); doc=SimpleDocTemplate(output,pagesize=size,leftMargin=30,rightMargin=30,topMargin=30,bottomMargin=30)
+        styles=getSampleStyleSheet(); charcoal=colors.HexColor("#211f1b"); gold=colors.HexColor("#c9ad69"); cream=colors.HexColor("#f6f1e6")
+        styles.add(ParagraphStyle(name="V10Title",parent=styles["Title"],fontName="Helvetica-Bold",fontSize=27,leading=31,textColor=charcoal,alignment=1))
+        story=[]
+        try: story.append(Image(io.BytesIO(base64.b64decode(CAMELIA_LOGO_HD_B64)),width=5.6*inch,height=.75*inch))
+        except Exception: pass
+        value=float((df.quantity*df.estimated_unit_value).sum()) if len(df) else 0
+        story += [Spacer(1,18),Paragraph("DOSSIER EJECUTIVO · V10 PREMIUM",ParagraphStyle(name="Label",parent=styles["Normal"],fontSize=9,textColor=gold,alignment=1)),Paragraph(title,styles["V10Title"]),Spacer(1,18)]
+        kpi=[["ARTÍCULOS","UNIDADES","CATEGORÍAS","VALOR ESTIMADO"],[f"{len(df):,}",f"{df.quantity.sum():,.0f}",f"{df.category.nunique():,}",f"${value:,.2f}"]]
+        t=Table(kpi,colWidths=[2.25*inch]*4,rowHeights=[.35*inch,.55*inch]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),charcoal),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BACKGROUND",(0,1),(-1,1),cream),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTNAME",(0,0),(-1,-1),"Helvetica-Bold"),("FONTSIZE",(0,1),(-1,1),16),("BOX",(0,0),(-1,-1),.8,gold)])); story += [t,Spacer(1,14),Paragraph(datetime.now().strftime("Emitido el %d/%m/%Y a las %H:%M"),ParagraphStyle(name="DateV10",parent=styles["Normal"],alignment=1,textColor=colors.HexColor("#756e64"))),PageBreak()]
+        summary=df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor","sum")).sort_values("Valor",ascending=False)
+        story.append(Paragraph("Resumen por categoría",styles["Heading2"])); rows=[["Categoría","Registros","Cantidad","Valor","Participación"]]+[[r.category,int(r.Registros),f"{r.Cantidad:,.2f}",f"${r.Valor:,.2f}",f"{r.Valor/value*100 if value else 0:.1f}%"] for _,r in summary.iterrows()]
+        rt=Table(rows,colWidths=[3.5*inch,1.2*inch,1.4*inch,1.7*inch,1.3*inch],repeatRows=1); rt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),charcoal),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,cream]),("GRID",(0,0),(-1,-1),.3,colors.HexColor("#d8ccb0")),("ALIGN",(1,1),(-1,-1),"RIGHT"),("FONTSIZE",(0,0),(-1,-1),8.5),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)])); story += [rt,PageBreak(),Paragraph("Detalle del inventario",styles["Heading2"])]
+        detail=[["ID","Categoría","Artículo","Marca","Cantidad","Unidad","Precio","Total","Estado"]]
+        for _,r in df.sort_values(["category","item_name"]).iterrows():
+            q=float(r.quantity or 0); p=float(r.estimated_unit_value or 0); detail.append([int(r.id),r.category,r.item_name,r.brand or "",f"{q:g}",r.unit,f"${p:,.2f}",f"${q*p:,.2f}",r.condition_status])
+        dt=Table(detail,colWidths=[.42*inch,1.15*inch,2.05*inch,1.15*inch,.65*inch,.65*inch,.85*inch,.95*inch,1.15*inch],repeatRows=1); dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),charcoal),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,cream]),("GRID",(0,0),(-1,-1),.25,colors.HexColor("#d8ccb0")),("FONTSIZE",(0,0),(-1,-1),7),("ALIGN",(4,1),(7,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"MIDDLE") ])); story.append(dt)
+        def footer(canvas,doc):
+            canvas.saveState(); canvas.setStrokeColor(gold); canvas.line(30,21,size[0]-30,21); canvas.setFont("Helvetica",7.5); canvas.setFillColor(colors.HexColor("#756e64")); canvas.drawString(30,9,"CAMELIA MODERN MEXICAN CUISINE · INVENTARIO V10 PREMIUM"); canvas.drawRightString(size[0]-30,9,f"Página {doc.page}"); canvas.restoreState()
+        doc.build(story,onFirstPage=footer,onLaterPages=footer); return output.getvalue()
+    except Exception:
+        # Si ReportLab falla por una imagen o dato inesperado, la app sigue generando PDF.
+        return _simple_pdf_document(df,title)
+
+
+def reports(df):
+    st.markdown(
+        "<div class='hero'><small>Centro documental</small>"
+        "<h1>Reportes ejecutivos</h1>"
+        "<p>Exportaciones profesionales para revisión, impresión y presentación durante el proceso de cierre.</p></div>",
+        unsafe_allow_html=True,
+    )
+    if df.empty:
+        st.info("El inventario está vacío.")
+        return
+
+    st.markdown(
+        "<div class='v10-section'><small>Exportaciones</small>"
+        "<h2>Documentos disponibles</h2></div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            "<div class='v10-doc'><h3>Excel corporativo</h3>"
+            "<p>Inventario completo y resúmenes por categoría y destino.</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "Descargar Excel",
+            excel_data(df),
+            f"Inventario_Camelia_{date.today().isoformat()}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with c2:
+        st.markdown(
+            "<div class='v10-doc'><h3>PDF ejecutivo</h3>"
+            "<p>Documento formal con portada, indicadores, resumen y detalle del inventario.</p></div>",
+            unsafe_allow_html=True,
+        )
+        pdf_data = _simple_pdf_document(df, "Inventario de Cierre - Camelia")
+        st.download_button(
+            "Descargar PDF",
+            pdf_data,
+            f"Inventario_Camelia_{date.today().isoformat()}.pdf",
+            "application/pdf",
+            use_container_width=True,
+        )
+
+    total = (df.quantity * df.estimated_unit_value).sum()
+    done = df.transfer_status.isin(["Entregado", "Permanece en Camelia"]).sum()
+    st.markdown(
+        f"### Resumen para cierre\n"
+        f"- Fecha: {date.today().strftime('%d/%m/%Y')}\n"
+        f"- Registros: {len(df)}\n"
+        f"- Cantidad total: {df.quantity.sum():,.0f}\n"
+        f"- Movimientos concluidos: {done}\n"
+        f"- Pendientes: {len(df)-done}\n"
+        f"- Valor estimado: ${total:,.2f}"
+    )
+    with db() as conn:
+        audit = pd.read_sql_query(
+            "SELECT action,detail,user_name,created_at FROM audit_log ORDER BY id DESC LIMIT 200",
+            conn,
+        )
+    if not audit.empty:
+        st.dataframe(
+            audit.rename(columns={"action":"Acción","detail":"Detalle","user_name":"Usuario","created_at":"Fecha"}),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 def create_complete_database_backup():
     """Crea una copia consistente de toda la base SQLite, incluidas fotos y tablas auxiliares."""
@@ -1166,7 +1451,7 @@ def guest_pdf_data(df):
         canvas.line(28, 22, landscape(letter)[0] - 28, 22)
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#6B6256"))
-        canvas.drawString(28, 11, "Camelia Modern Mexican Cuisine · Documento sin información monetaria")
+        canvas.drawString(28, 11, "Camelia Modern Mexican Cuisine · Documento de entrega")
         canvas.drawRightString(landscape(letter)[0] - 28, 11, f"Página {doc_obj.page}")
         canvas.restoreState()
 
@@ -1178,8 +1463,7 @@ def guest_reports(df):
     st.markdown(
         "<div class='hero'><small>Documentación de entrega</small>"
         "<h1>Relación del inventario</h1>"
-        "<p>Descarga la lista de artículos y cantidades incluidos. "
-        "Esta vista no contiene precios ni valores monetarios.</p></div>",
+        "<p>Descarga los documentos disponibles para revisión, impresión o presentación.</p></div>",
         unsafe_allow_html=True,
     )
     if df.empty:
@@ -1209,8 +1493,6 @@ def guest_reports(df):
             .rename(columns={"category": "Categoría"})
         )
         summary.to_excel(writer, index=False, sheet_name="Resumen categorías")
-
-        # Formato seguro, independiente de funciones antiguas que ya no existen.
         from openpyxl.styles import Alignment, Font, PatternFill
         from openpyxl.utils import get_column_letter
         header_fill = PatternFill("solid", fgColor="2F3A32")
@@ -1224,37 +1506,46 @@ def guest_reports(df):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             for column_cells in ws.columns:
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
-                width = min(max(max_length + 2, 11), 42)
-                ws.column_dimensions[get_column_letter(column_cells[0].column)].width = width
+                ws.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max(max_length + 2, 11), 42)
             for row in ws.iter_rows(min_row=2):
                 for cell in row:
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
 
-    csv_data = export.to_csv(index=False).encode("utf-8-sig")
-
-    # El PDF usa ReportLab. Si la dependencia todavía no está instalada,
-    # la pestaña continúa funcionando y muestra una instrucción clara.
     pdf_data = None
     pdf_error = None
     try:
         pdf_data = guest_pdf_data(df)
     except ModuleNotFoundError as exc:
         if exc.name == "reportlab" or str(exc.name).startswith("reportlab"):
-            pdf_error = (
-                "Falta instalar ReportLab. Agrega `reportlab` al archivo "
-                "requirements.txt y reinicia la aplicación."
-            )
+            pdf_error = "El generador de PDF todavía no está disponible. Verifica requirements.txt y reinicia la aplicación."
         else:
             raise
     except Exception as exc:
         pdf_error = f"No fue posible generar el PDF: {exc}"
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown("<div class='v10-doc'><h3>PDF de entrega</h3><p>Documento formal con resumen y detalle, sin precios.</p></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='v10-doc'><h3>Excel de entrega</h3>"
+            "<p>Inventario editable con resumen por categoría.</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "Descargar Excel",
+            excel_buffer.getvalue(),
+            f"Inventario_Entrega_Camelia_{date.today().isoformat()}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with c2:
+        st.markdown(
+            "<div class='v10-doc'><h3>PDF de entrega</h3>"
+            "<p>Documento formal con resumen y detalle del inventario.</p></div>",
+            unsafe_allow_html=True,
+        )
         if pdf_data is not None:
             st.download_button(
-                "Descargar PDF sin precios",
+                "Descargar PDF",
                 pdf_data,
                 f"Documento_Entrega_Camelia_{date.today().isoformat()}.pdf",
                 "application/pdf",
@@ -1262,29 +1553,10 @@ def guest_reports(df):
             )
         else:
             st.warning(pdf_error or "El PDF no está disponible temporalmente.")
-    with c2:
-        st.markdown("<div class='v10-doc'><h3>Excel de entrega</h3><p>Inventario y resumen por categoría, sin precios.</p></div>", unsafe_allow_html=True)
-        st.download_button(
-            "Descargar Excel sin precios",
-            excel_buffer.getvalue(),
-            f"Inventario_Entrega_Sin_Precios_{date.today().isoformat()}.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with c3:
-        st.markdown("<div class='v10-doc'><h3>CSV de entrega</h3><p>Lista compatible con Excel y Google Sheets, sin precios.</p></div>", unsafe_allow_html=True)
-        st.download_button(
-            "Descargar CSV sin precios",
-            csv_data,
-            f"Inventario_Entrega_Sin_Precios_{date.today().isoformat()}.csv",
-            "text/csv",
-            use_container_width=True,
-        )
-
 
 def guest_inventory(df):
     st.markdown("## Inventario incluido")
-    st.caption("Selecciona un artículo para consultar su fotografía y la información disponible. La información monetaria está oculta para el invitado.")
+    st.caption("Selecciona un artículo para consultar su fotografía y la información disponible. Consulta la fotografía y la información disponible del artículo.")
     filtered = filter_df(df, "guest_inv_")
     if filtered.empty:
         st.info("No hay artículos que coincidan con los filtros.")
