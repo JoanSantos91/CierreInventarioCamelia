@@ -1034,18 +1034,78 @@ def reports(df):
 
 
 def guest_dashboard(df):
-    st.markdown("<div class='hero'><small>Dossier de traspaso · V11 Executive</small><h1>Inventario incluido en Camelia</h1><p>Vista ejecutiva de los artículos, cantidades, precios y valores que permanecen en el establecimiento.</p></div>",unsafe_allow_html=True)
-    total=len(df); units=float(df.quantity.sum()) if total else 0; value=float((df.quantity*df.estimated_unit_value).sum()) if total else 0; cats=int(df.category.nunique()) if total else 0
-    for col,data in zip(st.columns(4),[("Artículos",f"{total:,}","Registros incluidos"),("Unidades",f"{units:,.0f}","Existencia entregada"),("Categorías",f"{cats:,}","Tipos de inventario"),("Valor total",f"${value:,.2f}","Valor estimado")]):
-        with col: metric(*data)
-    if df.empty: st.info("Todavía no hay artículos incluidos."); return
-    summary=df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor","sum")).sort_values("Valor",ascending=False)
-    st.markdown("<div class='v10-section'><small>Composición del inventario</small><h2>Resumen por categoría</h2></div>",unsafe_allow_html=True); _v10_category_cards(summary,value)
-    c1,c2=st.columns([1.2,1])
-    with c1: st.markdown("#### Valor por categoría"); st.bar_chart(summary.set_index("category")[["Valor"]],height=320,use_container_width=True)
-    with c2:
-        st.markdown("#### Principales artículos"); top=df.assign(Valor=df.quantity*df.estimated_unit_value).sort_values("Valor",ascending=False).head(8); st.dataframe(top[["item_name","quantity","Valor"]].rename(columns={"item_name":"Artículo","quantity":"Cantidad"}),hide_index=True,use_container_width=True,height=320,column_config={"Valor":st.column_config.NumberColumn(format="$%.2f")})
+    """Dashboard ejecutivo del invitado con el mismo diseño visual que Camelia y Administrador."""
+    st.markdown(
+        "<div class='hero'><small>Dossier de traspaso · V11.1 Executive</small>"
+        "<h1>Inventario incluido en Camelia</h1>"
+        "<p>Vista ejecutiva de los artículos, cantidades, precios y valores que permanecen en el establecimiento.</p></div>",
+        unsafe_allow_html=True,
+    )
 
+    total = len(df)
+    units = float(df.quantity.sum()) if total else 0
+    value = float((df.quantity * df.estimated_unit_value).sum()) if total else 0
+    cats = int(df.category.nunique()) if total else 0
+    pending = int(df.transfer_status.isin(["Pendiente", "Separado", "En traslado"]).sum()) if total else 0
+
+    metrics = [
+        ("Artículos", f"{total:,}", "Registros incluidos"),
+        ("Unidades", f"{units:,.0f}", "Existencia entregada"),
+        ("Valor total", f"${value:,.0f}", "Valor estimado"),
+        ("Categorías", f"{cats:,}", "Familias de activos"),
+        ("Pendientes", f"{pending:,}", "Por revisar o entregar"),
+    ]
+    for col, data in zip(st.columns(5), metrics):
+        with col:
+            metric(*data)
+
+    if df.empty:
+        st.info("Todavía no hay artículos incluidos.")
+        return
+
+    summary = (
+        df.assign(Valor=df.quantity * df.estimated_unit_value)
+        .groupby("category", as_index=False)
+        .agg(Registros=("id", "count"), Cantidad=("quantity", "sum"), Valor=("Valor", "sum"))
+        .sort_values("Valor", ascending=False)
+    )
+
+    st.markdown(
+        "<div class='v10-section'><small>Composición financiera</small>"
+        "<h2>Valor por categoría</h2></div>",
+        unsafe_allow_html=True,
+    )
+    _v10_category_cards(summary, value)
+
+    c1, c2 = st.columns([1.25, 1])
+    with c1:
+        st.markdown("#### Distribución horizontal del valor")
+        # Se utiliza exactamente la misma gráfica horizontal del panel de Camelia/Administrador.
+        _horizontal_value_chart(summary, value, 10)
+    with c2:
+        st.markdown("#### Top 10 artículos por valor")
+        top = (
+            df.assign(Valor=df.quantity * df.estimated_unit_value)
+            .sort_values("Valor", ascending=False)
+            .head(10)
+        )
+        st.dataframe(
+            top[["item_name", "category", "quantity", "Valor"]].rename(
+                columns={"item_name": "Artículo", "category": "Categoría", "quantity": "Cantidad"}
+            ),
+            hide_index=True,
+            use_container_width=True,
+            height=390,
+            column_config={"Valor": st.column_config.NumberColumn(format="$%.2f")},
+        )
+
+    st.markdown(
+        "<div class='v10-section'><small>Seguimiento operativo</small>"
+        "<h2>Avance de la entrega</h2></div>",
+        unsafe_allow_html=True,
+    )
+    done = int(df.transfer_status.isin(["Entregado", "Permanece en Camelia"]).sum())
+    st.progress(done / max(total, 1), text=f"{done} de {total} registros concluidos ({done / max(total, 1):.0%})")
 
 def guest_reports(df):
     st.markdown("<div class='hero'><small>Documentación de entrega</small><h1>Dossier del inventario</h1><p>Descarga la relación profesional de artículos, cantidades, precios y valores incluidos en el traspaso.</p></div>",unsafe_allow_html=True)
