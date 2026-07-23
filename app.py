@@ -483,6 +483,58 @@ def view_df(df):
     out["Estado inventario"] = out["inventory_status"] if "inventory_status" in out.columns else "🟢 Completo"
     return out.rename(columns={"id":"ID","category":"Categoría","subcategory":"Tipo","item_name":"Artículo","brand":"Marca","condition_status":"Estado","destination_detail":"Ubicación destino","transfer_status":"Movimiento","responsible_person":"Responsable","notes":"Notas"})
 
+def inventory_article_detail(df, key_prefix="camel_detail_"):
+    """Muestra el detalle y la fotografía de un artículo sin permitir modificaciones."""
+    if df.empty:
+        return
+
+    st.markdown("### Consultar artículo")
+    st.caption("Selecciona un artículo para ver su fotografía y la información completa.")
+
+    choices = {
+        f"#{int(r.id)} · {r.item_name} · {r.quantity:g} {r.unit}": int(r.id)
+        for _, r in df.sort_values(["item_name", "id"]).iterrows()
+    }
+    selected_label = st.selectbox(
+        "Artículo inventariado",
+        list(choices.keys()),
+        key=f"{key_prefix}select",
+    )
+    selected = df[df.id.eq(choices[selected_label])].iloc[0]
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        photo = selected.get("photo")
+        if photo is not None and not pd.isna(photo):
+            st.image(photo, use_container_width=True, caption=selected.item_name)
+        else:
+            st.info("Este artículo no tiene fotografía registrada.")
+
+    with c2:
+        unit_price = float(selected.estimated_unit_value or 0)
+        total_value = float(selected.quantity or 0) * unit_price
+        st.markdown(f"### {selected.item_name}")
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            metric("Cantidad", f"{selected.quantity:g} {selected.unit}", "Inventario registrado")
+        with m2:
+            metric("Precio unitario", f"${unit_price:,.2f}", "Valor estimado")
+        with m3:
+            metric("Valor total", f"${total_value:,.2f}", "Cantidad × precio")
+
+        st.markdown(f"**Categoría:** {selected.category} · {selected.subcategory}")
+        st.markdown(f"**Marca:** {selected.brand or 'Sin marca'}")
+        st.markdown(f"**Condición:** {selected.condition_status}")
+        location = selected.get("location_summary") or selected.current_area or "No especificadas"
+        destination = selected.get("destination_summary") or selected.destination or "No especificado"
+        st.markdown(f"**Áreas de origen:** {location}")
+        st.markdown(f"**Destino:** {destination}")
+        if selected.description:
+            st.markdown(f"**Descripción:** {selected.description}")
+        if selected.notes:
+            st.markdown(f"**Notas:** {selected.notes}")
+
+
 def inventory(df,admin):
     st.markdown("## Inventario"); f=filter_df(df,"inv_")
     if f.empty: st.info("No hay artículos que coincidan con los filtros."); return
@@ -499,6 +551,9 @@ def inventory(df,admin):
         with t2:
             st.warning("Esta acción elimina el registro."); ok=st.checkbox("Confirmo que deseo eliminarlo.")
             if st.button("Eliminar definitivamente",disabled=not ok): delete_item(sid,st.session_state.user["name"]); st.rerun()
+    else:
+        st.markdown("---")
+        inventory_article_detail(f, "camel_inventory_detail_")
 
 def destinations(df):
     st.markdown("## Destino de los artículos"); f=filter_df(df,"dest_")
