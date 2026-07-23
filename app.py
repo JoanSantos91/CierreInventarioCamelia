@@ -564,6 +564,274 @@ def create_complete_database_backup():
             pass
 
 
+
+REQUIRED_RESTORE_TABLES = {
+    "inventory",
+    "audit_log",
+    "item_locations",
+    "item_destinations",
+}
+
+
+def inspect_database_backup(database_bytes):
+    """Valida un respaldo SQLite y devuelve un resumen antes de restaurarlo."""
+    if not database_bytes:
+        raise ValueError("El archivo está vacío.")
+
+    # La cabecera oficial de SQLite evita aceptar archivos renombrados por error.
+    if not database_bytes.startswith(b"SQLite format 3\\x00"):
+        raise ValueError("El archivo seleccionado no es una base SQLite válida.")
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
+        temp_file.write(database_bytes)
+
+    try:
+        connection = sqlite3.connect(f"file:{temp_path}?mode=ro", uri=True, timeout=20)
+        try:
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            if str(integrity).lower() != "ok":
+                raise ValueError(f"La base no pasó la revisión de integridad: {integrity}")
+
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            missing = REQUIRED_RESTORE_TABLES - tables
+            if missing:
+                raise ValueError(
+                    "Faltan tablas necesarias: " + ", ".join(sorted(missing))
+                )
+
+            inventory_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(inventory)").fetchall()
+            }
+            required_columns = {
+                "id", "item_name", "quantity", "estimated_unit_value", "photo"
+            }
+            missing_columns = required_columns - inventory_columns
+            if missing_columns:
+                raise ValueError(
+                    "La tabla de inventario no tiene las columnas esperadas: "
+                    + ", ".join(sorted(missing_columns))
+                )
+
+            summary = {}
+            for table in sorted(REQUIRED_RESTORE_TABLES):
+                summary[table] = int(
+                    connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                )
+
+            photo_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM inventory "
+                    "WHERE photo IS NOT NULL AND length(photo) > 0"
+                ).fetchone()[0]
+            )
+            totals = connection.execute(
+                "SELECT COALESCE(SUM(quantity), 0), "
+                "COALESCE(SUM(quantity * estimated_unit_value), 0) "
+                "FROM inventory"
+            ).fetchone()
+
+            return {
+                "tables": summary,
+                "photos": photo_count,
+                "units": float(totals[0] or 0),
+                "value": float(totals[1] or 0),
+                "size_bytes": len(database_bytes),
+            }
+        finally:
+            connection.close()
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def restore_database_backup(database_bytes, restored_by):
+    """Restaura la base completa y conserva una copia automática del estado anterior."""
+    # Validar nuevamente justo antes de tocar la base activa.
+    uploaded_summary = inspect_database_backup(database_bytes)
+
+    backup_dir = APP_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    automatic_backup_path = backup_dir / f"antes_de_restaurar_{timestamp}.db"
+
+    # Crear respaldo consistente de la base actual.
+    current = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    automatic = sqlite3.connect(automatic_backup_path)
+    try:
+        current.backup(automatic)
+        automatic.commit()
+    finally:
+        automatic.close()
+        current.close()
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_file:
+        uploaded_path = Path(temp_file.name)
+        temp_file.write(database_bytes)
+
+    try:
+        source = sqlite3.connect(uploaded_path, timeout=30, check_same_thread=False)
+        target = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+        try:
+            # El API backup de SQLite copia todas las páginas de forma segura.
+            source.backup(target)
+            target.commit()
+        finally:
+            target.close()
+            source.close()
+
+        # Confirmar que la base restaurada quedó íntegra.
+        restored_bytes = create_complete_database_backup()
+        restored_summary = inspect_database_backup(restored_bytes)
+
+        if restored_summary["tables"] != uploaded_summary["tables"]:
+            raise RuntimeError(
+                "La restauración terminó, pero los conteos no coinciden con el respaldo cargado."
+            )
+
+        # Registrar la restauración dentro de la base recién recuperada.
+        try:
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO audit_log(inventory_id,action,detail,user_name,created_at) "
+                    "VALUES(NULL,?,?,?,?)",
+                    (
+                        "Restauración de respaldo",
+                        f"Base completa restaurada. Copia previa: {automatic_backup_path.name}",
+                        restored_by,
+                        datetime.now().isoformat(timespec="seconds"),
+                    ),
+                )
+        except Exception:
+            # El respaldo sigue siendo válido aunque una versión antigua no acepte el registro.
+            pass
+
+        return {
+            "automatic_backup_path": automatic_backup_path,
+            "automatic_backup_bytes": automatic_backup_path.read_bytes(),
+            "restored_summary": restored_summary,
+        }
+
+    except Exception:
+        # Recuperación automática del estado anterior si algo falla durante el proceso.
+        try:
+            source = sqlite3.connect(automatic_backup_path, timeout=30, check_same_thread=False)
+            target = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+            try:
+                source.backup(target)
+                target.commit()
+            finally:
+                target.close()
+                source.close()
+        except Exception:
+            pass
+        raise
+    finally:
+        uploaded_path.unlink(missing_ok=True)
+
+
+def restore_backup_panel():
+    """Interfaz protegida para recuperar toda la información desde un archivo .db."""
+    st.markdown(
+        "<div class='v10-section'><small>Recuperación de emergencia</small>"
+        "<h2>Restaurar una copia de seguridad</h2></div>",
+        unsafe_allow_html=True,
+    )
+    st.warning(
+        "La restauración reemplaza toda la información actual por la contenida en el respaldo. "
+        "Antes de hacerlo, la aplicación crea automáticamente una copia de la base actual."
+    )
+
+    uploaded = st.file_uploader(
+        "Selecciona el respaldo completo (.db)",
+        type=["db", "sqlite", "sqlite3"],
+        key="restore_database_uploader",
+        help="Utiliza únicamente un archivo descargado desde el botón de copia completa de esta aplicación.",
+    )
+
+    if uploaded is None:
+        st.caption("Ningún archivo seleccionado. No se realizará ningún cambio.")
+        return
+
+    uploaded_bytes = uploaded.getvalue()
+    try:
+        summary = inspect_database_backup(uploaded_bytes)
+    except Exception as exc:
+        st.error(f"No se puede usar este respaldo: {exc}")
+        return
+
+    st.success("El archivo pasó la revisión de integridad y es compatible con la aplicación.")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric("Artículos", f"{summary['tables']['inventory']:,}", "Registros del respaldo")
+    with c2:
+        metric("Unidades", f"{summary['units']:,.0f}", "Existencia total")
+    with c3:
+        metric("Fotografías", f"{summary['photos']:,}", "Imágenes almacenadas")
+    with c4:
+        metric("Valor", f"${summary['value']:,.2f}", "Valor estimado")
+
+    with st.expander("Ver detalle técnico del respaldo"):
+        st.write(f"Archivo: **{uploaded.name}**")
+        st.write(f"Tamaño: **{summary['size_bytes'] / (1024 * 1024):,.2f} MB**")
+        st.json(summary["tables"])
+
+    confirm = st.text_input(
+        "Para confirmar, escribe exactamente RESTAURAR",
+        key="restore_confirmation_text",
+        placeholder="RESTAURAR",
+    )
+    acknowledge = st.checkbox(
+        "Entiendo que la base actual será reemplazada por este respaldo.",
+        key="restore_acknowledgement",
+    )
+
+    disabled = confirm.strip().upper() != "RESTAURAR" or not acknowledge
+    if st.button(
+        "♻️ Restaurar toda la información",
+        type="primary",
+        use_container_width=True,
+        disabled=disabled,
+    ):
+        try:
+            with st.spinner("Creando copia preventiva y restaurando la base..."):
+                result = restore_database_backup(
+                    uploaded_bytes,
+                    st.session_state.get("user", {}).get("name", "Administrador"),
+                )
+
+            st.session_state["last_pre_restore_backup"] = result["automatic_backup_bytes"]
+            st.session_state["last_pre_restore_backup_name"] = result[
+                "automatic_backup_path"
+            ].name
+            st.session_state["restore_success_message"] = (
+                "La base fue restaurada correctamente. "
+                f"Se recuperaron {result['restored_summary']['tables']['inventory']:,} artículos."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                "No se pudo completar la restauración. La aplicación intentó regresar "
+                f"automáticamente a la base anterior. Detalle: {exc}"
+            )
+
+    if st.session_state.get("last_pre_restore_backup"):
+        st.download_button(
+            "⬇️ Descargar copia automática anterior a la restauración",
+            data=st.session_state["last_pre_restore_backup"],
+            file_name=st.session_state.get(
+                "last_pre_restore_backup_name", "antes_de_restaurar.db"
+            ),
+            mime="application/octet-stream",
+            use_container_width=True,
+        )
+
+
 def guest_excel_data(df):
     """Excel para el interesado con precios y valor del inventario que permanece en Camelia."""
     out = io.BytesIO()
@@ -1090,6 +1358,11 @@ def reports(df):
             )
         else:
             st.warning("Todavía no se encontró el archivo de base de datos para crear el respaldo.")
+
+        if st.session_state.pop("restore_success_message", None):
+            st.success("La base fue restaurada correctamente y toda la información quedó disponible.")
+
+        restore_backup_panel()
 
 
 def guest_dashboard(df):
