@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -47,7 +48,7 @@ UNITS = ["pieza(s)", "botella(s)", "caja(s)", "paquete(s)", "kg", "g", "litro(s)
 STATUSES = ["Pendiente", "Separado", "En traslado", "Entregado", "Permanece en Camelia"]
 CONDITIONS = ["Nuevo", "Excelente", "Bueno", "Regular", "Requiere reparación", "No utilizable"]
 
-st.set_page_config(page_title="Camelia · Inventario V11 Executive", page_icon="🌿", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Camelia · Inventario V11.2 Backup", page_icon="🌿", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -534,6 +535,33 @@ def reports(df):
     total=(df.quantity*df.estimated_unit_value).sum(); done=df.transfer_status.isin(["Entregado","Permanece en Camelia"]).sum(); st.markdown(f"### Resumen para cierre\n- Fecha: {date.today().strftime('%d/%m/%Y')}\n- Registros: {len(df)}\n- Cantidad total: {df.quantity.sum():,.0f}\n- Movimientos concluidos: {done}\n- Pendientes: {len(df)-done}\n- Valor estimado: ${total:,.2f}")
     with db() as conn: audit=pd.read_sql_query("SELECT action,detail,user_name,created_at FROM audit_log ORDER BY id DESC LIMIT 200",conn)
     if not audit.empty: st.dataframe(audit.rename(columns={"action":"Acción","detail":"Detalle","user_name":"Usuario","created_at":"Fecha"}),use_container_width=True,hide_index=True)
+
+
+def create_complete_database_backup():
+    """Crea una copia consistente de toda la base SQLite, incluidas fotos y tablas auxiliares."""
+    if not DB_PATH.exists():
+        return None
+
+    # sqlite3.backup genera una instantánea segura aun cuando la app esté abierta.
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
+
+    try:
+        source = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+        target = sqlite3.connect(temp_path)
+        try:
+            source.backup(target)
+            target.commit()
+        finally:
+            target.close()
+            source.close()
+
+        return temp_path.read_bytes()
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def guest_excel_data(df):
@@ -1031,6 +1059,37 @@ def reports(df):
         pdf=_v10_pdf(df,"Inventario de Cierre · Camelia")
         st.download_button("Descargar PDF Premium",pdf,f"Inventario_Camelia_V11_{date.today().isoformat()}.pdf","application/pdf",use_container_width=True)
         st.caption("El PDF se genera dentro de la aplicación. El comprador no necesita instalar ningún programa adicional.")
+
+    # Respaldo completo disponible únicamente para el administrador.
+    if st.session_state.get("user", {}).get("role") == "admin":
+        st.markdown(
+            "<div class='v10-section'><small>Protección de datos</small>"
+            "<h2>Copia completa de seguridad</h2></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div class='note'><b>Este archivo conserva toda la información de la aplicación:</b> "
+            "inventario, fotografías, ubicaciones, destinos e historial de movimientos. "
+            "Guárdalo fuera de Streamlit, preferentemente también en Google Drive, OneDrive o una memoria externa.</div>",
+            unsafe_allow_html=True,
+        )
+        backup_data = create_complete_database_backup()
+        if backup_data:
+            backup_name = f"camelia_inventory_backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.db"
+            st.download_button(
+                "💾 Descargar base de datos completa",
+                data=backup_data,
+                file_name=backup_name,
+                mime="application/octet-stream",
+                use_container_width=True,
+                help="Descarga una instantánea completa y consistente de la base SQLite.",
+            )
+            st.caption(
+                f"Respaldo preparado: {len(backup_data) / (1024 * 1024):,.2f} MB · "
+                "No modifica ni elimina la información actual."
+            )
+        else:
+            st.warning("Todavía no se encontró el archivo de base de datos para crear el respaldo.")
 
 
 def guest_dashboard(df):
