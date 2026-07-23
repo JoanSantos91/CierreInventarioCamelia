@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import html
 import io
 import os
 import sqlite3
@@ -1017,6 +1018,162 @@ def guest_dashboard(df):
     )
 
 
+
+def guest_pdf_data(df):
+    """Genera el documento PDF del inventario del invitado sin precios ni valores."""
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    )
+
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=landscape(letter),
+        rightMargin=28, leftMargin=28, topMargin=30, bottomMargin=30,
+        title="Inventario incluido en Camelia",
+        author="Camelia Modern Mexican Cuisine",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "CameliaTitle", parent=styles["Title"], fontName="Helvetica-Bold",
+        fontSize=22, leading=26, textColor=colors.HexColor("#2F3A32"),
+        alignment=TA_CENTER, spaceAfter=8,
+    )
+    subtitle_style = ParagraphStyle(
+        "CameliaSubtitle", parent=styles["Normal"], fontSize=10, leading=14,
+        textColor=colors.HexColor("#6B6256"), alignment=TA_CENTER, spaceAfter=14,
+    )
+    section_style = ParagraphStyle(
+        "CameliaSection", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=13, leading=16, textColor=colors.HexColor("#2F3A32"),
+        spaceBefore=8, spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "CameliaBody", parent=styles["BodyText"], fontSize=7.5, leading=9.5,
+        alignment=TA_LEFT, textColor=colors.HexColor("#2B2925"),
+    )
+    small_style = ParagraphStyle(
+        "CameliaSmall", parent=styles["BodyText"], fontSize=7, leading=8.5,
+        alignment=TA_LEFT, textColor=colors.HexColor("#2B2925"),
+    )
+
+    story = [
+        Paragraph("CAMELIA MODERN MEXICAN CUISINE", title_style),
+        Paragraph(
+            "Documento de entrega · Inventario incluido sin precios ni valores monetarios<br/>"
+            f"Generado el {date.today().strftime('%d/%m/%Y')}",
+            subtitle_style,
+        ),
+    ]
+
+    total_items = len(df)
+    total_units = float(df["quantity"].sum()) if total_items else 0
+    total_categories = int(df["category"].nunique()) if total_items else 0
+    metrics = Table(
+        [
+            ["ARTÍCULOS", "UNIDADES", "CATEGORÍAS"],
+            [f"{total_items:,}", f"{total_units:,.0f}", f"{total_categories:,}"],
+        ],
+        colWidths=[2.35 * inch] * 3,
+        hAlign="CENTER",
+    )
+    metrics.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2F3A32")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#F4EFE5")),
+        ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor("#2F3A32")),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 1), (-1, 1), 16),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#C9AD69")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D9CBAA")),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([metrics, Spacer(1, 14), Paragraph("Resumen por categoría", section_style)])
+
+    summary = (
+        df.groupby("category", as_index=False)
+        .agg(Registros=("id", "count"), Cantidad=("quantity", "sum"))
+        .sort_values(["Cantidad", "Registros"], ascending=False)
+    )
+    summary_data = [["Categoría", "Artículos", "Cantidad"]]
+    for _, row in summary.iterrows():
+        summary_data.append([
+            Paragraph(html.escape(str(row["category"])), body_style),
+            f"{int(row['Registros']):,}",
+            f"{float(row['Cantidad']):,.0f}",
+        ])
+    summary_table = Table(summary_data, colWidths=[4.7 * inch, 1.15 * inch, 1.25 * inch], repeatRows=1)
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2F3A32")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D9CBAA")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8F5EE")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+    ]))
+    story.extend([summary_table, PageBreak(), Paragraph("Detalle del inventario", section_style)])
+
+    headers = ["ID", "Categoría", "Tipo", "Artículo", "Marca", "Cantidad", "Unidad", "Estado", "Áreas de origen", "Notas"]
+    table_data = [headers]
+    for _, row in df.sort_values(["category", "item_name", "id"]).iterrows():
+        table_data.append([
+            str(int(row["id"])),
+            Paragraph(html.escape(str(row.get("category", ""))), small_style),
+            Paragraph(html.escape(str(row.get("subcategory", ""))), small_style),
+            Paragraph(html.escape(str(row.get("item_name", ""))), small_style),
+            Paragraph(html.escape(str(row.get("brand", ""))), small_style),
+            f"{float(row.get('quantity', 0)):,.2f}".rstrip("0").rstrip("."),
+            Paragraph(html.escape(str(row.get("unit", ""))), small_style),
+            Paragraph(html.escape(str(row.get("condition_status", ""))), small_style),
+            Paragraph(html.escape(str(row.get("location_summary", ""))), small_style),
+            Paragraph(html.escape(str(row.get("notes", ""))), small_style),
+        ])
+    widths = [0.38, 0.82, 0.78, 1.38, 0.72, 0.55, 0.55, 0.72, 1.35, 1.35]
+    detail_table = Table(table_data, colWidths=[x * inch for x in widths], repeatRows=1)
+    detail_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2F3A32")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 6.8),
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("ALIGN", (5, 1), (5, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9CBAA")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8F5EE")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(detail_table)
+
+    def footer(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#C9AD69"))
+        canvas.line(28, 22, landscape(letter)[0] - 28, 22)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#6B6256"))
+        canvas.drawString(28, 11, "Camelia Modern Mexican Cuisine · Documento sin información monetaria")
+        canvas.drawRightString(landscape(letter)[0] - 28, 11, f"Página {doc_obj.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    output.seek(0)
+    return output.getvalue()
+
 def guest_reports(df):
     st.markdown(
         "<div class='hero'><small>Documentación de entrega</small>"
@@ -1074,8 +1231,18 @@ def guest_reports(df):
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
 
     csv_data = export.to_csv(index=False).encode("utf-8-sig")
-    c1, c2 = st.columns(2)
+    pdf_data = guest_pdf_data(df)
+    c1, c2, c3 = st.columns(3)
     with c1:
+        st.markdown("<div class='v10-doc'><h3>PDF de entrega</h3><p>Documento formal con resumen y detalle, sin precios.</p></div>", unsafe_allow_html=True)
+        st.download_button(
+            "Descargar PDF sin precios",
+            pdf_data,
+            f"Documento_Entrega_Camelia_{date.today().isoformat()}.pdf",
+            "application/pdf",
+            use_container_width=True,
+        )
+    with c2:
         st.markdown("<div class='v10-doc'><h3>Excel de entrega</h3><p>Inventario y resumen por categoría, sin precios.</p></div>", unsafe_allow_html=True)
         st.download_button(
             "Descargar Excel sin precios",
@@ -1084,7 +1251,7 @@ def guest_reports(df):
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-    with c2:
+    with c3:
         st.markdown("<div class='v10-doc'><h3>CSV de entrega</h3><p>Lista compatible con Excel y Google Sheets, sin precios.</p></div>", unsafe_allow_html=True)
         st.download_button(
             "Descargar CSV sin precios",
