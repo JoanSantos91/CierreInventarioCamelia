@@ -1453,6 +1453,68 @@ def guest_reports(df):
         st.caption("El comprador puede descargarlo y abrirlo directamente desde su navegador, sin instalar librerías.")
 
 
+
+def guest_inventory(df):
+    st.markdown("## Inventario incluido")
+    st.caption("Selecciona un artículo para consultar su fotografía y toda la información disponible.")
+    filtered = filter_df(df, "guest_inv_")
+    if filtered.empty:
+        st.info("No hay artículos que coincidan con los filtros.")
+        return
+
+    table = filtered.copy()
+    table["Precio unitario"] = table["estimated_unit_value"].map(lambda x: f"${float(x):,.2f}")
+    table["Valor total"] = (table["quantity"] * table["estimated_unit_value"]).map(lambda x: f"${float(x):,.2f}")
+    table = table.rename(columns={
+        "id": "ID", "category": "Categoría", "subcategory": "Tipo",
+        "item_name": "Artículo", "brand": "Marca", "quantity": "Cantidad",
+        "unit": "Unidad", "condition_status": "Estado",
+    })
+    columns = ["ID", "Categoría", "Tipo", "Artículo", "Marca", "Cantidad", "Unidad", "Precio unitario", "Valor total", "Estado"]
+    st.dataframe(
+        table[columns], use_container_width=True, hide_index=True, height=430,
+        column_config={
+            "ID": st.column_config.NumberColumn(width="small"),
+            "Artículo": st.column_config.TextColumn(width="large"),
+        },
+    )
+    st.caption(f"Mostrando {len(filtered)} de {len(df)} registros incluidos en Camelia.")
+
+    st.markdown("### Consultar artículo")
+    choices = {
+        f"#{int(r.id)} · {r.item_name} · {r.quantity:g} {r.unit}": int(r.id)
+        for _, r in filtered.sort_values(["item_name", "id"]).iterrows()
+    }
+    selected_label = st.selectbox("Artículo inventariado", list(choices.keys()))
+    selected = filtered[filtered.id.eq(choices[selected_label])].iloc[0]
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        photo = selected.get("photo")
+        if photo is not None and not pd.isna(photo):
+            st.image(photo, use_container_width=True, caption=selected.item_name)
+        else:
+            st.info("Este artículo no tiene fotografía registrada.")
+    with c2:
+        unit_price = float(selected.estimated_unit_value or 0)
+        total_value = float(selected.quantity or 0) * unit_price
+        st.markdown(f"### {selected.item_name}")
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            metric("Cantidad", f"{selected.quantity:g} {selected.unit}", "Permanece en Camelia")
+        with m2:
+            metric("Precio unitario", f"${unit_price:,.2f}", "Valor estimado")
+        with m3:
+            metric("Valor total", f"${total_value:,.2f}", "Cantidad × precio")
+        st.markdown(f"**Categoría:** {selected.category} · {selected.subcategory}")
+        st.markdown(f"**Marca:** {selected.brand or 'Sin marca'}")
+        st.markdown(f"**Condición:** {selected.condition_status}")
+        st.markdown(f"**Áreas de origen:** {selected.get('location_summary') or selected.current_area or 'No especificadas'}")
+        if selected.description:
+            st.markdown(f"**Descripción:** {selected.description}")
+        if selected.notes:
+            st.markdown(f"**Notas:** {selected.notes}")
+
 def main():
     init_db()
     if "user" not in st.session_state:
