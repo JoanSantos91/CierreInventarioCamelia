@@ -975,7 +975,7 @@ def guest_dashboard(df):
         with card_cols[index % 3]:
             st.markdown(
                 f"<div class='summary-card'>"
-                f"<small>{row['category']}</small>"
+                f"<small>{html.escape(str(row['category']))}</small>"
                 f"<h3>{float(row['Cantidad']):,.0f}</h3>"
                 f"<p>{int(row['Registros']):,} artículo(s)</p>"
                 f"</div>",
@@ -983,10 +983,22 @@ def guest_dashboard(df):
             )
 
     st.markdown("#### Cantidad por categoría")
-    chart_data = summary.rename(
-        columns={"category": "Categoría", "Cantidad": "Unidades"}
-    ).set_index("Categoría")[["Unidades"]]
-    st.bar_chart(chart_data, horizontal=True, use_container_width=True)
+    max_quantity = max(float(summary["Cantidad"].max()), 1.0)
+    rows_html = []
+    for _, row in summary.head(12).iterrows():
+        category = html.escape(str(row["category"]))
+        quantity = float(row["Cantidad"])
+        width = max(3.0, min(100.0, (quantity / max_quantity) * 100.0))
+        rows_html.append(
+            "<div class='hbar-row'>"
+            f"<div class='hbar-label'>{category}</div>"
+            "<div class='hbar-track'>"
+            f"<div class='hbar-fill' style='width:{width:.2f}%'></div>"
+            "</div>"
+            f"<div class='hbar-value'>{quantity:,.0f} unidades</div>"
+            "</div>"
+        )
+    st.markdown("<div class='hbar-wrap'>" + "".join(rows_html) + "</div>", unsafe_allow_html=True)
 
     st.markdown("#### Principales artículos por cantidad")
     top = df.sort_values("quantity", ascending=False).head(10)
@@ -1003,6 +1015,7 @@ def guest_dashboard(df):
         use_container_width=True,
         height=390,
     )
+
 
 def guest_reports(df):
     st.markdown(
@@ -1039,7 +1052,26 @@ def guest_reports(df):
             .rename(columns={"category": "Categoría"})
         )
         summary.to_excel(writer, index=False, sheet_name="Resumen categorías")
-        _v10_style_excel(writer)
+
+        # Formato seguro, independiente de funciones antiguas que ya no existen.
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+        header_fill = PatternFill("solid", fgColor="2F3A32")
+        header_font = Font(color="FFFFFF", bold=True)
+        for ws in writer.book.worksheets:
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            for column_cells in ws.columns:
+                max_length = max(len(str(cell.value or "")) for cell in column_cells)
+                width = min(max(max_length + 2, 11), 42)
+                ws.column_dimensions[get_column_letter(column_cells[0].column)].width = width
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
 
     csv_data = export.to_csv(index=False).encode("utf-8-sig")
     c1, c2 = st.columns(2)
