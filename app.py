@@ -39,7 +39,7 @@ UNITS = ["pieza(s)", "botella(s)", "caja(s)", "paquete(s)", "kg", "g", "litro(s)
 STATUSES = ["Pendiente", "Separado", "En traslado", "Entregado", "Permanece en Camelia"]
 CONDITIONS = ["Nuevo", "Excelente", "Bueno", "Regular", "Requiere reparación", "No utilizable"]
 
-st.set_page_config(page_title="Cierre de Inventario · Camelia", page_icon="🌿", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Camelia · Inventario V10 Premium", page_icon="🌿", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -672,6 +672,168 @@ def guest_reports(df):
         f"\n- Categorías: {df.category.nunique()}"
         f"\n- Valor estimado total: ${total_value:,.2f}"
     )
+
+
+# ==============================
+# CAMELIA V10 PREMIUM OVERRIDES
+# ==============================
+
+st.markdown("""
+<style>
+:root{--v10-black:#191815;--v10-gold:#c9ad69;--v10-cream:#f7f2e8;--v10-muted:#81796d}
+.stApp{background:radial-gradient(circle at 95% 0%,rgba(201,173,105,.18),transparent 28%),linear-gradient(180deg,#fbfaf7,#f1ede5)}
+.block-container{max-width:1520px;padding-top:.55rem}
+[data-testid="stHeader"]{background:rgba(251,250,247,.82);backdrop-filter:blur(16px);border-bottom:1px solid rgba(201,173,105,.18)}
+.hero{padding:38px;border-radius:25px;border:1px solid rgba(201,173,105,.38);box-shadow:0 20px 48px rgba(28,25,20,.17)}
+.hero h1{font-size:2.55rem;letter-spacing:-.04em}.hero p{line-height:1.55;max-width:880px}
+.metric{border:1px solid rgba(201,173,105,.42);border-radius:19px;background:linear-gradient(145deg,#fff,#f8f4eb);box-shadow:0 12px 30px rgba(44,38,29,.08)}
+.metric:after{content:'';position:absolute;width:76px;height:76px;border-radius:50%;right:-30px;bottom:-34px;background:rgba(201,173,105,.14)}
+.v10-section{margin:27px 0 12px}.v10-section small{color:#9a8351;font-weight:850;letter-spacing:.13em;text-transform:uppercase}.v10-section h2{margin:2px 0 0;font-size:1.5rem;letter-spacing:-.025em}
+.v10-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin:8px 0 20px}
+.v10-card{background:rgba(255,255,255,.97);border:1px solid #dfd1b1;border-radius:18px;padding:16px 17px;box-shadow:0 10px 25px rgba(43,37,28,.07)}
+.v10-card-title{font-weight:850}.v10-card-meta{font-size:.75rem;color:#81796d;margin-top:5px}.v10-card-value{font-size:1.38rem;font-weight:900;margin-top:10px;color:#211f1a}.v10-bar{height:5px;background:#eee6d7;border-radius:99px;margin-top:11px;overflow:hidden}.v10-bar i{display:block;height:100%;background:linear-gradient(90deg,#a98943,#dec88f)}
+.v10-doc{background:linear-gradient(145deg,#fff,#f8f3e9);border:1px solid #ddcdab;border-radius:20px;padding:20px;min-height:150px;box-shadow:0 12px 30px rgba(42,36,27,.07)}
+div[role="radiogroup"]{position:sticky;top:.35rem;z-index:20;backdrop-filter:blur(15px);border-color:#decfab}
+.stDownloadButton>button{background:linear-gradient(135deg,#24211d,#453d31);color:#fff;border:1px solid #c9ad69}
+.v10-footer{text-align:center;color:#92897c;font-size:.72rem;padding:28px 0 2px;letter-spacing:.07em}
+@media(max-width:700px){.hero{padding:25px 19px}.hero h1{font-size:1.85rem}.v10-grid{grid-template-columns:1fr 1fr}}
+</style>
+""", unsafe_allow_html=True)
+
+
+def _v10_category_cards(summary, total_value):
+    cards=[]
+    for _,r in summary.head(12).iterrows():
+        share=float(r["Valor"])/total_value*100 if total_value else 0
+        cards.append(
+            f"<div class='v10-card'><div class='v10-card-title'>{r['category']}</div>"
+            f"<div class='v10-card-meta'>{int(r['Registros'])} registros · {float(r['Cantidad']):g} unidades</div>"
+            f"<div class='v10-card-value'>${float(r['Valor']):,.2f}</div>"
+            f"<div class='v10-card-meta'>{share:.1f}% del valor</div>"
+            f"<div class='v10-bar'><i style='width:{min(share,100):.1f}%'></i></div></div>"
+        )
+    st.markdown("<div class='v10-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
+
+
+def dashboard(df):
+    st.markdown("<div class='hero'><small>Panel ejecutivo · V10 Premium</small><h1>Inventario de Cierre</h1><p>Lectura financiera y operativa del inventario de Camelia: valor, categorías, distribución, condición y destino final.</p></div>",unsafe_allow_html=True)
+    total=len(df); units=float(df.quantity.sum()) if total else 0; value=float((df.quantity*df.estimated_unit_value).sum()) if total else 0
+    pending=int(df.transfer_status.isin(["Pendiente","Separado","En traslado"]).sum()) if total else 0; cats=int(df.category.nunique()) if total else 0
+    for col,data in zip(st.columns(5),[("Artículos",f"{total:,}","Registros inventariados"),("Unidades",f"{units:,.0f}","Existencia consolidada"),("Valor total",f"${value:,.0f}","Valor estimado"),("Categorías",f"{cats:,}","Familias de activos"),("Pendientes",f"{pending:,}","Por mover o entregar")]):
+        with col: metric(*data)
+    if df.empty:
+        st.info("Aún no hay artículos registrados."); return
+    summary=df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor","sum")).sort_values("Valor",ascending=False)
+    st.markdown("<div class='v10-section'><small>Composición financiera</small><h2>Valor por categoría</h2></div>",unsafe_allow_html=True)
+    _v10_category_cards(summary,value)
+    c1,c2=st.columns([1.25,1])
+    with c1:
+        st.markdown("#### Distribución del valor"); st.bar_chart(summary.set_index("category")[["Valor"]].head(10),height=330,use_container_width=True)
+    with c2:
+        st.markdown("#### Top 10 artículos por valor")
+        top=df.assign(Valor=df.quantity*df.estimated_unit_value).sort_values("Valor",ascending=False).head(10)
+        st.dataframe(top[["item_name","category","quantity","Valor"]].rename(columns={"item_name":"Artículo","category":"Categoría","quantity":"Cantidad"}),hide_index=True,use_container_width=True,height=330,column_config={"Valor":st.column_config.NumberColumn(format="$%.2f")})
+    st.markdown("<div class='v10-section'><small>Seguimiento operativo</small><h2>Avance del cierre</h2></div>",unsafe_allow_html=True)
+    done=int(df.transfer_status.isin(["Entregado","Permanece en Camelia"]).sum()); st.progress(done/max(total,1),text=f"{done} de {total} registros concluidos ({done/max(total,1):.0%})")
+
+
+def _v10_style_excel(writer):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    for ws in writer.book.worksheets:
+        ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions; ws.sheet_view.showGridLines=False
+        for cell in ws[1]:
+            cell.fill=PatternFill("solid",fgColor="211F1B"); cell.font=Font(color="FFFFFF",bold=True); cell.alignment=Alignment(horizontal="center")
+        ws.row_dimensions[1].height=26
+        for column in ws.columns:
+            letter=get_column_letter(column[0].column); width=max(len(str(c.value or "")) for c in column)+2; ws.column_dimensions[letter].width=min(max(width,12),42)
+        for row in range(2,ws.max_row+1):
+            if row%2==0:
+                for cell in ws[row]: cell.fill=PatternFill("solid",fgColor="F5F0E5")
+        ws.oddFooter.center.text="Camelia Modern Mexican Cuisine · V10 Premium"; ws.oddFooter.right.text="Página &P de &N"
+
+
+def excel_data(df):
+    out=io.BytesIO(); x=df.drop(columns=["photo"],errors="ignore").copy(); x["Valor total"]=x.quantity*x.estimated_unit_value
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        x.to_excel(writer,index=False,sheet_name="Inventario")
+        x.groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor total","sum")).to_excel(writer,index=False,sheet_name="Resumen categorías")
+        x.groupby("destination",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor total","sum")).to_excel(writer,index=False,sheet_name="Resumen destinos")
+        _v10_style_excel(writer)
+    return out.getvalue()
+
+
+def _v10_pdf(df,title):
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape, letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image
+    except ImportError:
+        return None
+    output=io.BytesIO(); size=landscape(letter); doc=SimpleDocTemplate(output,pagesize=size,leftMargin=30,rightMargin=30,topMargin=30,bottomMargin=30)
+    styles=getSampleStyleSheet(); charcoal=colors.HexColor("#211f1b"); gold=colors.HexColor("#c9ad69"); cream=colors.HexColor("#f6f1e6")
+    styles.add(ParagraphStyle(name="V10Title",parent=styles["Title"],fontName="Helvetica-Bold",fontSize=27,leading=31,textColor=charcoal,alignment=1))
+    story=[]
+    try: story.append(Image(io.BytesIO(base64.b64decode(CAMELIA_LOGO_HD_B64)),width=5.6*inch,height=.75*inch))
+    except Exception: pass
+    value=float((df.quantity*df.estimated_unit_value).sum()) if len(df) else 0
+    story += [Spacer(1,18),Paragraph("DOSSIER EJECUTIVO · V10 PREMIUM",ParagraphStyle(name="Label",parent=styles["Normal"],fontSize=9,textColor=gold,alignment=1)),Paragraph(title,styles["V10Title"]),Spacer(1,18)]
+    kpi=[["ARTÍCULOS","UNIDADES","CATEGORÍAS","VALOR ESTIMADO"],[f"{len(df):,}",f"{df.quantity.sum():,.0f}",f"{df.category.nunique():,}",f"${value:,.2f}"]]
+    t=Table(kpi,colWidths=[2.25*inch]*4,rowHeights=[.35*inch,.55*inch]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),charcoal),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BACKGROUND",(0,1),(-1,1),cream),("ALIGN",(0,0),(-1,-1),"CENTER"),("FONTNAME",(0,0),(-1,-1),"Helvetica-Bold"),("FONTSIZE",(0,1),(-1,1),16),("BOX",(0,0),(-1,-1),.8,gold)])); story += [t,Spacer(1,14),Paragraph(datetime.now().strftime("Emitido el %d/%m/%Y a las %H:%M"),ParagraphStyle(name="DateV10",parent=styles["Normal"],alignment=1,textColor=colors.HexColor("#756e64"))),PageBreak()]
+    summary=df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor","sum")).sort_values("Valor",ascending=False)
+    story.append(Paragraph("Resumen por categoría",styles["Heading2"])); rows=[["Categoría","Registros","Cantidad","Valor","Participación"]]+[[r.category,int(r.Registros),f"{r.Cantidad:,.2f}",f"${r.Valor:,.2f}",f"{r.Valor/value*100 if value else 0:.1f}%"] for _,r in summary.iterrows()]
+    rt=Table(rows,colWidths=[3.5*inch,1.2*inch,1.4*inch,1.7*inch,1.3*inch],repeatRows=1); rt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),charcoal),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,cream]),("GRID",(0,0),(-1,-1),.3,colors.HexColor("#d8ccb0")),("ALIGN",(1,1),(-1,-1),"RIGHT"),("FONTSIZE",(0,0),(-1,-1),8.5),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)])); story += [rt,PageBreak(),Paragraph("Detalle del inventario",styles["Heading2"])]
+    detail=[["ID","Categoría","Artículo","Marca","Cantidad","Unidad","Precio","Total","Estado"]]
+    for _,r in df.sort_values(["category","item_name"]).iterrows():
+        q=float(r.quantity or 0); p=float(r.estimated_unit_value or 0); detail.append([int(r.id),r.category,r.item_name,r.brand or "",f"{q:g}",r.unit,f"${p:,.2f}",f"${q*p:,.2f}",r.condition_status])
+    dt=Table(detail,colWidths=[.42*inch,1.15*inch,2.05*inch,1.15*inch,.65*inch,.65*inch,.85*inch,.95*inch,1.15*inch],repeatRows=1); dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),charcoal),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,cream]),("GRID",(0,0),(-1,-1),.25,colors.HexColor("#d8ccb0")),("FONTSIZE",(0,0),(-1,-1),7),("ALIGN",(4,1),(7,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"MIDDLE") ])); story.append(dt)
+    def footer(canvas,doc):
+        canvas.saveState(); canvas.setStrokeColor(gold); canvas.line(30,21,size[0]-30,21); canvas.setFont("Helvetica",7.5); canvas.setFillColor(colors.HexColor("#756e64")); canvas.drawString(30,9,"CAMELIA MODERN MEXICAN CUISINE · INVENTARIO V10 PREMIUM"); canvas.drawRightString(size[0]-30,9,f"Página {doc.page}"); canvas.restoreState()
+    doc.build(story,onFirstPage=footer,onLaterPages=footer); return output.getvalue()
+
+
+def reports(df):
+    st.markdown("<div class='hero'><small>Centro documental</small><h1>Reportes ejecutivos</h1><p>Exportaciones profesionales para análisis, impresión y presentación durante el proceso de cierre.</p></div>",unsafe_allow_html=True)
+    st.markdown("<div class='v10-section'><small>Exportaciones</small><h2>Documentos disponibles</h2></div>",unsafe_allow_html=True)
+    c1,c2=st.columns(2)
+    with c1:
+        st.markdown("<div class='v10-doc'><h3>Excel corporativo</h3><p>Inventario completo, resúmenes por categoría y destino, filtros y formato profesional.</p></div>",unsafe_allow_html=True)
+        st.download_button("Descargar Excel Premium",excel_data(df),f"Inventario_Camelia_V10_{date.today().isoformat()}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+    with c2:
+        st.markdown("<div class='v10-doc'><h3>PDF ejecutivo</h3><p>Portada, indicadores, resumen financiero, inventario detallado, pie de página y numeración.</p></div>",unsafe_allow_html=True)
+        pdf=_v10_pdf(df,"Inventario de Cierre · Camelia")
+        if pdf: st.download_button("Descargar PDF Premium",pdf,f"Inventario_Camelia_V10_{date.today().isoformat()}.pdf","application/pdf",use_container_width=True)
+        else: st.warning("Instala ReportLab para activar el PDF: pip install reportlab")
+
+
+def guest_dashboard(df):
+    st.markdown("<div class='hero'><small>Dossier de traspaso · V10 Premium</small><h1>Inventario incluido en Camelia</h1><p>Vista ejecutiva de los artículos, cantidades, precios y valores que permanecen en el establecimiento.</p></div>",unsafe_allow_html=True)
+    total=len(df); units=float(df.quantity.sum()) if total else 0; value=float((df.quantity*df.estimated_unit_value).sum()) if total else 0; cats=int(df.category.nunique()) if total else 0
+    for col,data in zip(st.columns(4),[("Artículos",f"{total:,}","Registros incluidos"),("Unidades",f"{units:,.0f}","Existencia entregada"),("Categorías",f"{cats:,}","Tipos de inventario"),("Valor total",f"${value:,.2f}","Valor estimado")]):
+        with col: metric(*data)
+    if df.empty: st.info("Todavía no hay artículos incluidos."); return
+    summary=df.assign(Valor=df.quantity*df.estimated_unit_value).groupby("category",as_index=False).agg(Registros=("id","count"),Cantidad=("quantity","sum"),Valor=("Valor","sum")).sort_values("Valor",ascending=False)
+    st.markdown("<div class='v10-section'><small>Composición del inventario</small><h2>Resumen por categoría</h2></div>",unsafe_allow_html=True); _v10_category_cards(summary,value)
+    c1,c2=st.columns([1.2,1])
+    with c1: st.markdown("#### Valor por categoría"); st.bar_chart(summary.set_index("category")[["Valor"]],height=320,use_container_width=True)
+    with c2:
+        st.markdown("#### Principales artículos"); top=df.assign(Valor=df.quantity*df.estimated_unit_value).sort_values("Valor",ascending=False).head(8); st.dataframe(top[["item_name","quantity","Valor"]].rename(columns={"item_name":"Artículo","quantity":"Cantidad"}),hide_index=True,use_container_width=True,height=320,column_config={"Valor":st.column_config.NumberColumn(format="$%.2f")})
+
+
+def guest_reports(df):
+    st.markdown("<div class='hero'><small>Documentación de entrega</small><h1>Dossier del inventario</h1><p>Descarga la relación profesional de artículos, cantidades, precios y valores incluidos en el traspaso.</p></div>",unsafe_allow_html=True)
+    if df.empty: st.info("No hay artículos disponibles para descargar."); return
+    c1,c2=st.columns(2)
+    with c1:
+        st.markdown("<div class='v10-doc'><h3>Excel de entrega</h3><p>Archivo editable con inventario y resumen financiero por categoría.</p></div>",unsafe_allow_html=True)
+        st.download_button("Descargar Excel de entrega",guest_excel_data(df),f"Inventario_Entrega_Camelia_V10_{date.today().isoformat()}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+    with c2:
+        st.markdown("<div class='v10-doc'><h3>PDF de presentación</h3><p>Documento listo para revisar, imprimir o presentar al comprador.</p></div>",unsafe_allow_html=True)
+        pdf=_v10_pdf(df,"Inventario incluido en el traspaso")
+        if pdf: st.download_button("Descargar PDF de presentación",pdf,f"Dossier_Camelia_V10_{date.today().isoformat()}.pdf","application/pdf",use_container_width=True)
+        else: st.warning("Instala ReportLab para activar el PDF: pip install reportlab")
 
 
 def main():
