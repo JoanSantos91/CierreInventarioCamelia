@@ -1231,17 +1231,37 @@ def guest_reports(df):
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
 
     csv_data = export.to_csv(index=False).encode("utf-8-sig")
-    pdf_data = guest_pdf_data(df)
+
+    # El PDF usa ReportLab. Si la dependencia todavía no está instalada,
+    # la pestaña continúa funcionando y muestra una instrucción clara.
+    pdf_data = None
+    pdf_error = None
+    try:
+        pdf_data = guest_pdf_data(df)
+    except ModuleNotFoundError as exc:
+        if exc.name == "reportlab" or str(exc.name).startswith("reportlab"):
+            pdf_error = (
+                "Falta instalar ReportLab. Agrega `reportlab` al archivo "
+                "requirements.txt y reinicia la aplicación."
+            )
+        else:
+            raise
+    except Exception as exc:
+        pdf_error = f"No fue posible generar el PDF: {exc}"
+
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("<div class='v10-doc'><h3>PDF de entrega</h3><p>Documento formal con resumen y detalle, sin precios.</p></div>", unsafe_allow_html=True)
-        st.download_button(
-            "Descargar PDF sin precios",
-            pdf_data,
-            f"Documento_Entrega_Camelia_{date.today().isoformat()}.pdf",
-            "application/pdf",
-            use_container_width=True,
-        )
+        if pdf_data is not None:
+            st.download_button(
+                "Descargar PDF sin precios",
+                pdf_data,
+                f"Documento_Entrega_Camelia_{date.today().isoformat()}.pdf",
+                "application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.warning(pdf_error or "El PDF no está disponible temporalmente.")
     with c2:
         st.markdown("<div class='v10-doc'><h3>Excel de entrega</h3><p>Inventario y resumen por categoría, sin precios.</p></div>", unsafe_allow_html=True)
         st.download_button(
