@@ -49,7 +49,7 @@ UNITS = ["pieza(s)", "botella(s)", "caja(s)", "paquete(s)", "kg", "g", "litro(s)
 STATUSES = ["Pendiente", "Separado", "En traslado", "Entregado", "Permanece en Camelia"]
 CONDITIONS = ["Nuevo", "Excelente", "Bueno", "Regular", "Requiere reparación", "No utilizable"]
 
-st.set_page_config(page_title="Camelia · Inventario V11.2 Backup", page_icon="🌿", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Camelia · Inventario V12 Executive", page_icon="🌿", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -110,6 +110,63 @@ div[role="radiogroup"]{background:rgba(255,255,255,.82);border:1px solid var(--l
 .hbar-label{font-weight:800;white-space:normal;line-height:1.15}.hbar-track{height:18px;border-radius:999px;background:#ece7dc;overflow:hidden}.hbar-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#8f753c,#d7bd75)}.hbar-value{text-align:right;font-weight:800;font-variant-numeric:tabular-nums}
 @media(max-width:1100px){.restaurant-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.restaurant-grid{grid-template-columns:1fr}.hbar-row{grid-template-columns:1fr}.hbar-value{text-align:left}.restaurant-card{min-height:270px}}
+
+
+/* V12: contraste estable en móviles y dispositivos con modo oscuro */
+html, body, [data-testid="stAppViewContainer"], .stApp {
+  color-scheme: light !important;
+}
+.stApp, .stApp p, .stApp span, .stApp label, .stApp li,
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
+  color: #292725;
+}
+.stApp .hero, .stApp .hero p, .stApp .hero h1, .stApp .hero small,
+.stApp .restaurant-info, .stApp .restaurant-info span,
+.stApp .restaurant-info strong, .stApp .restaurant-name {
+  color: #ffffff;
+}
+.stApp .hero small, .stApp .restaurant-name { color:#ead9ad; }
+.stButton > button, .stDownloadButton > button {
+  color:#292725 !important;
+  background:#ffffff !important;
+  border:1px solid #cfc3ad !important;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  color:#171512 !important;
+  border-color:#a98d4f !important;
+  background:#fbf7ef !important;
+}
+.stButton > button[kind="primary"] {
+  color:#ffffff !important;
+  background:linear-gradient(135deg,#2f2b27,#4b443c) !important;
+}
+div[role="radiogroup"] label,
+div[role="radiogroup"] label p,
+div[role="radiogroup"] label span {
+  color:#292725 !important;
+  opacity:1 !important;
+}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+  color:#625c53 !important;
+}
+.summary-card, .hbar-wrap, .metric, .dest, .note {
+  color:#292725 !important;
+}
+.summary-card small, .summary-card h3, .summary-card p,
+.hbar-label, .hbar-value { color:#292725 !important; }
+input, textarea, [data-baseweb="select"] > div {
+  color:#292725 !important;
+  background:#ffffff !important;
+}
+@media (max-width:700px) {
+  div[role="radiogroup"] { display:block !important; padding:8px 10px !important; }
+  div[role="radiogroup"] > label { display:flex !important; margin:4px 0 !important; }
+  .stButton > button, .stDownloadButton > button { min-height:48px !important; font-size:1rem !important; }
+  .top-logo-wrap { background:#ffffff !important; }
+  .hbar-wrap { padding:14px !important; }
+  .hbar-row { grid-template-columns:1fr !important; gap:6px !important; }
+  .hbar-value { text-align:left !important; }
+}
 
 </style>
 """, unsafe_allow_html=True)
@@ -458,6 +515,24 @@ def dashboard(df):
             if tmp.empty: st.info("Aún no hay fechas registradas.")
             else:
                 tmp["Días"]=tmp.expiration_date.apply(lambda x:expiry(x)[1]); tmp=tmp.sort_values("Días").head(10); st.dataframe(tmp[["item_name","quantity","unit","expiration_date","destination"]].rename(columns={"item_name":"Artículo","quantity":"Cant.","unit":"Unidad","expiration_date":"Caducidad","destination":"Destino"}),use_container_width=True,hide_index=True)
+
+        st.markdown("#### Principales artículos por precio")
+        top_price = df.assign(Valor_total=df.quantity * df.estimated_unit_value).sort_values(
+            ["estimated_unit_value", "Valor_total"], ascending=False
+        ).head(10)
+        st.dataframe(
+            top_price[["item_name", "category", "quantity", "unit", "estimated_unit_value", "Valor_total"]].rename(
+                columns={
+                    "item_name": "Artículo", "category": "Categoría", "quantity": "Cantidad",
+                    "unit": "Unidad", "estimated_unit_value": "Precio unitario", "Valor_total": "Valor total"
+                }
+            ),
+            hide_index=True, use_container_width=True,
+            column_config={
+                "Precio unitario": st.column_config.NumberColumn(format="$%.2f"),
+                "Valor total": st.column_config.NumberColumn(format="$%.2f"),
+            },
+        )
 
 def filter_df(df,prefix):
     if df.empty:return df
@@ -920,7 +995,7 @@ def inspect_database_backup(database_bytes):
         raise ValueError("El archivo está vacío.")
 
     # La cabecera oficial de SQLite evita aceptar archivos renombrados por error.
-    if not database_bytes.startswith(b"SQLite format 3\\x00"):
+    if not database_bytes.startswith(b"SQLite format 3\x00"):
         raise ValueError("El archivo seleccionado no es una base SQLite válida.")
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_file:
@@ -1173,6 +1248,45 @@ def restore_backup_panel():
         )
 
 
+def admin_backup_page():
+    """Centro de respaldos visible únicamente para el administrador."""
+    st.markdown(
+        "<div class='hero'><small>Protección de la información</small>"
+        "<h1>Copias de seguridad</h1>"
+        "<p>Descarga una copia completa de la base o recupera toda la información desde un respaldo anterior.</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.get("restore_success_message"):
+        st.success(st.session_state.pop("restore_success_message"))
+
+    st.markdown(
+        "<div class='v10-section'><small>Respaldo completo</small>"
+        "<h2>Guardar toda la información</h2></div>",
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "La copia incluye inventario, fotografías, precios, cantidades, ubicaciones, "
+        "destinos y el historial de movimientos."
+    )
+
+    backup_bytes = create_complete_database_backup()
+    if backup_bytes:
+        backup_name = f"camelia_inventory_backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.db"
+        st.download_button(
+            "⬇️ Descargar respaldo completo",
+            data=backup_bytes,
+            file_name=backup_name,
+            mime="application/octet-stream",
+            use_container_width=True,
+        )
+    else:
+        st.error("No se encontró la base de datos activa para crear el respaldo.")
+
+    st.divider()
+    restore_backup_panel()
+
+
 def guest_excel_data(df):
     """Excel para el interesado con precios y valor del inventario que permanece en Camelia."""
     out = io.BytesIO()
@@ -1286,8 +1400,9 @@ def guest_dashboard(df):
         )
     st.markdown("<div class='hbar-wrap'>" + "".join(rows_html) + "</div>", unsafe_allow_html=True)
 
-    st.markdown("#### Principales artículos por cantidad")
-    top = df.sort_values("quantity", ascending=False).head(10)
+    st.markdown("#### Principales artículos por precio")
+    sort_column = "_sort_unit_price" if "_sort_unit_price" in df.columns else "quantity"
+    top = df.sort_values([sort_column, "quantity"], ascending=False).head(10)
     st.dataframe(
         top[["item_name", "category", "quantity", "unit"]].rename(
             columns={
@@ -1470,7 +1585,7 @@ def guest_reports(df):
         st.info("No hay artículos disponibles para descargar.")
         return
 
-    export = df.drop(columns=["photo", "estimated_unit_value"], errors="ignore").copy()
+    export = df.drop(columns=["photo", "estimated_unit_value", "_sort_unit_price"], errors="ignore").copy()
     preferred = [
         "id", "category", "subcategory", "item_name", "description", "brand",
         "quantity", "unit", "condition_status", "location_summary",
@@ -1634,8 +1749,13 @@ def main():
         guest_df["quantity"] = guest_df["camelia_quantity"]
         guest_df["destination"] = "Camelia · permanece en el local"
         guest_df["destination_summary"] = "Camelia · permanece en el local"
-        # Protección adicional: la vista del invitado no recibe la columna de precios.
-        # Así no puede mostrarse accidentalmente "Valor estimado", precio unitario ni valor total.
+        # Se conserva una columna interna únicamente para ordenar el Top de artículos.
+        # No se muestra ni se exporta al invitado.
+        if "estimated_unit_value" in guest_df.columns:
+            guest_df["_sort_unit_price"] = guest_df["estimated_unit_value"].fillna(0)
+        else:
+            guest_df["_sort_unit_price"] = 0
+        # Protección adicional: la vista del invitado no recibe la columna visible de precios.
         guest_df = guest_df.drop(columns=["estimated_unit_value"], errors="ignore")
         options = ["Inicio", "Inventario incluido", "Documento de entrega"]
         page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
@@ -1651,6 +1771,7 @@ def main():
     options = ["Resumen", "Inventario", "Destinos", "Caducidades", "Reportes"]
     if admin:
         options.insert(1, "Registrar artículo")
+        options.append("Respaldos")
     page = st.radio("Navegación", options, horizontal=True, label_visibility="collapsed")
     if page == "Resumen":
         dashboard(df)
@@ -1668,6 +1789,10 @@ def main():
         destinations(df)
     elif page == "Caducidades":
         expirations(df)
+    elif page == "Reportes":
+        reports(df)
+    elif page == "Respaldos" and admin:
+        admin_backup_page()
     else:
         reports(df)
 
