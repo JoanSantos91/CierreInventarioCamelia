@@ -594,12 +594,41 @@ def save_item(v,user,item_id=None):
     log(sid,action,v["item_name"],user); return sid
 
 def delete_item(item_id,user):
+    """Elimina un artículo en una sola transacción y conserva el evento en auditoría.
+
+    El registro de auditoría usa inventory_id=NULL porque el artículo deja de existir.
+    Así evitamos violaciones de clave foránea y conservamos el nombre/id original
+    dentro del detalle del historial.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
     with db() as conn:
-        row=conn.execute("SELECT item_name FROM inventory WHERE id=?",(item_id,)).fetchone()
+        row = conn.execute(
+            "SELECT id,item_name,category,quantity FROM inventory WHERE id=?",
+            (item_id,),
+        ).fetchone()
+
+        if not row:
+            return False
+
+        item_name = row["item_name"] if row else ""
+        category = row["category"] if row else ""
+        quantity = row["quantity"] if row else 0
+
         conn.execute("DELETE FROM item_locations WHERE inventory_id=?", (item_id,))
         conn.execute("DELETE FROM item_destinations WHERE inventory_id=?", (item_id,))
-        conn.execute("DELETE FROM inventory WHERE id=?",(item_id,))
-    log(item_id,"ELIMINADO",row["item_name"] if row else "",user)
+        conn.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+
+        detail = (
+            f"ID eliminado: {item_id} | Artículo: {item_name} | "
+            f"Categoría: {category} | Cantidad: {quantity}"
+        )
+        conn.execute(
+            "INSERT INTO audit_log(inventory_id,action,detail,user_name,created_at) "
+            "VALUES(?,?,?,?,?)",
+            (None, "ELIMINADO", detail, user, now),
+        )
+
+    return True
 
 def form(existing=None):
     e = existing or {}
